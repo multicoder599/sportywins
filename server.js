@@ -289,7 +289,31 @@ app.delete('/api/admin/matches/:id', async (req, res) => {
         res.status(500).json({ error: "Failed to delete match." });
     }
 });
+// 5. Get All Bets (Admin View)
+app.get('/api/admin/bets', async (req, res) => {
+    try {
+        const bets = await Bet.find().populate('userId', 'username phone').sort({ date: -1 });
+        res.status(200).json(bets);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch all bets." });
+    }
+});
 
+// 6. Fix/Update Match Result Override
+app.put('/api/admin/matches/:id/result', async (req, res) => {
+    try {
+        const { score, isLive } = req.body;
+        const match = await Match.findByIdAndUpdate(
+            req.params.id, 
+            { score: score, isLive: isLive }, 
+            { new: true }
+        );
+        if (!match) return res.status(404).json({ error: "Match not found." });
+        res.status(200).json({ message: "Result updated", match });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to update result." });
+    }
+});
 // 4. Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
