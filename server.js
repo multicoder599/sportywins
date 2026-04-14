@@ -143,7 +143,54 @@ app.get('/api/live-matches', async (req, res) => {
         res.status(500).json({ error: "Could not fetch live matches from Odds API." });
     }
 });
+// --- ADMIN ROUTES ---
 
+// 1. Get All Users
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find().select('-password'); // Exclude passwords for safety
+        res.status(200).json(users);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to fetch users." });
+    }
+});
+
+// 2. Add/Update User Balance
+app.put('/api/admin/users/:id/balance', async (req, res) => {
+    try {
+        const { amount } = req.body;
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        
+        user.balance += parseFloat(amount);
+        await user.save();
+        
+        res.status(200).json({ message: "Balance updated successfully!", balance: user.balance });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to update balance." });
+    }
+});
+
+// 3. Add a Manual Match to the Database
+app.post('/api/admin/matches', async (req, res) => {
+    try {
+        const newMatch = new Match(req.body);
+        await newMatch.save();
+        res.status(201).json({ message: "Match injected successfully!", match: newMatch });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to add match." });
+    }
+});
+
+// 4. Delete a Manual Match
+app.delete('/api/admin/matches/:id', async (req, res) => {
+    try {
+        await Match.findByIdAndDelete(req.params.id);
+        res.status(200).json({ message: "Match deleted." });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to delete match." });
+    }
+});
 // 4. Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
