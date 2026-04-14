@@ -114,7 +114,7 @@ dist
 .env.production.local
 
 # OS Generated Files
-.DS_Store
+.DS_Storee
 .DS_Store?
 ._*
 .Spotlight-V100
