@@ -101,7 +101,7 @@ app.post('/api/auth/register', async (req, res) => {
         const newUser = new User({ 
             username, email, phone, 
             password: hashedPassword, 
-            name: username, 
+            name: username, // Explicitly map username to name
             currency, countryCode 
         });
         await newUser.save();
@@ -109,9 +109,20 @@ app.post('/api/auth/register', async (req, res) => {
         // Welcome Notification
         await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready. Deposit now to start betting." }).save();
 
+        // Fixed payload: Include name, username, and oddsFormat explicitly
         res.status(201).json({ 
             message: "User created", 
-            user: { _id: newUser._id, username: newUser.username, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode } 
+            user: { 
+                _id: newUser._id, 
+                username: newUser.username, 
+                name: newUser.name,
+                email: newUser.email, 
+                phone: newUser.phone, 
+                balance: newUser.balance, 
+                currency: newUser.currency, 
+                countryCode: newUser.countryCode,
+                oddsFormat: newUser.oddsFormat
+            } 
         });
     } catch (err) {
         res.status(500).json({ error: "Server error during registration." });
@@ -121,15 +132,42 @@ app.post('/api/auth/register', async (req, res) => {
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
-        const user = await User.findOne({ $or: [{ phone: identifier }, { email: identifier }, { username: identifier }] });
-        if (!user) return res.status(400).json({ error: "User not found." });
+        
+        // Flexible Phone Matching Logic: Extracts the last 9 digits of the input
+        const digitsOnly = identifier.replace(/\D/g, '');
+        let phoneQuery = identifier;
+        if (digitsOnly.length >= 9) {
+            phoneQuery = { $regex: new RegExp(digitsOnly.slice(-9) + '$') };
+        }
+
+        const user = await User.findOne({ 
+            $or: [
+                { email: identifier }, 
+                { username: identifier }, 
+                { phone: phoneQuery },
+                { phone: identifier } // Fallback exact match
+            ] 
+        });
+
+        if (!user) return res.status(400).json({ error: "User not found. Check your details." });
 
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(400).json({ error: "Invalid password." });
 
+        // Fixed payload: Include name, username, and oddsFormat explicitly
         res.status(200).json({ 
             message: "Login successful", 
-            user: { _id: user._id, username: user.username, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode } 
+            user: { 
+                _id: user._id, 
+                username: user.username, 
+                name: user.name,
+                email: user.email, 
+                phone: user.phone, 
+                balance: user.balance, 
+                currency: user.currency, 
+                countryCode: user.countryCode,
+                oddsFormat: user.oddsFormat
+            } 
         });
     } catch (err) {
         res.status(500).json({ error: "Server error during login." });
