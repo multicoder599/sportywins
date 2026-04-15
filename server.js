@@ -53,7 +53,7 @@ const BetSchema = new mongoose.Schema({
 });
 const Bet = mongoose.model('Bet', BetSchema);
 
-// NEW: Transaction Schema
+// Transaction Schema
 const TransactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win
@@ -64,7 +64,7 @@ const TransactionSchema = new mongoose.Schema({
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
-// NEW: Notification Schema
+// Notification Schema
 const NotificationSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Null means global
     title: String,
@@ -160,15 +160,10 @@ app.post('/api/wallet/deposit', async (req, res) => {
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         
-        user.balance += parseFloat(amount);
-        await user.save();
-
-        const txn = new Transaction({ userId, type: 'Deposit', amount, currency, status: 'Completed' });
+        const txn = new Transaction({ userId, type: 'Deposit', amount, currency, status: 'Pending' });
         await txn.save();
 
-        await new Notification({ userId, title: "Deposit Successful", message: `Your deposit of ${amount} ${currency} via ${method} is complete.` }).save();
-
-        res.status(200).json({ message: "Deposit successful", balance: user.balance });
+        res.status(200).json({ message: "Deposit requested successfully. Pending admin approval.", balance: user.balance });
     } catch (err) { res.status(500).json({ error: "Deposit failed." }); }
 });
 
@@ -197,21 +192,19 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 });
 
 
-// --- REAL-TIME ODDS API INTEGRATION (MAXIMIZED + GRADED) ---
+// --- REAL-TIME ODDS API INTEGRATION ---
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
 
 app.get('/api/live-matches', async (req, res) => {
     try {
-        const userCountry = req.query.countryCode || 'GB'; // Frontend can pass this
+        const userCountry = req.query.countryCode || 'GB'; 
 
-        // Calculate 30 Day Window
         const now = new Date();
         const nextMonth = new Date();
         nextMonth.setDate(now.getDate() + 30);
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextMonth.toISOString().split('.')[0] + 'Z';
 
-        // Fetch multiple sports concurrently
         const sportsToFetch = ['soccer_epl', 'soccer_uefa_champs_league', 'basketball_nba', 'tennis_atp', 'mma_mixed_martial_arts'];
         
         let allApiMatches = [];
@@ -247,10 +240,8 @@ app.get('/api/live-matches', async (req, res) => {
             if(match.sport_key.includes('tennis')) mappedSport = 'tennis';
             if(match.sport_key.includes('mma')) mappedSport = 'mma';
 
-            // Grading Score (Higher means it shows up higher in the feed)
             let gradeScore = 0;
             if(isLiveNow) gradeScore += 100;
-            // Elevate matches relevant to user's location
             if(userCountry === 'GB' && match.sport_key.includes('epl')) gradeScore += 50;
             if(userCountry === 'US' && match.sport_key.includes('nba')) gradeScore += 50;
 
@@ -269,16 +260,13 @@ app.get('/api/live-matches', async (req, res) => {
                 score: mockScore,
                 odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30,
-                gradeScore: gradeScore // Used for sorting
+                gradeScore: gradeScore 
             };
         });
 
-        // Sort by Grade Score (Live/Local first), then by date
         formattedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
-
-        res.status(200).json(formattedMatches.slice(0, 100)); // Send Top 100
+        res.status(200).json(formattedMatches.slice(0, 100)); 
     } catch (err) {
-        console.error("Odds API Fetch Error:", err.message);
         res.status(500).json({ error: "Could not fetch live matches." });
     }
 });
@@ -289,7 +277,6 @@ app.get('/api/search', async (req, res) => {
         const query = req.query.q;
         if (!query) return res.status(200).json([]);
         
-        // Search manual DB matches
         const dbResults = await Match.find({
             $or: [
                 { home: { $regex: query, $options: 'i' } },
@@ -297,7 +284,6 @@ app.get('/api/search', async (req, res) => {
                 { league: { $regex: query, $options: 'i' } }
             ]
         });
-
         res.status(200).json(dbResults);
     } catch (err) { res.status(500).json({ error: "Search failed." }); }
 });
@@ -352,17 +338,63 @@ app.get('/api/admin/users', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to fetch users." }); }
 });
 
-app.put('/api/admin/users/:id/balance', async (req, res) => {
+app.put('/api/admin/users/:id/balance/set', async (req, res) => {
     try {
         const { amount } = req.body;
         const user = await User.findById(req.params.id);
         if (!user) return res.status(404).json({ error: "User not found." });
         
-        user.balance += parseFloat(amount);
+        user.balance = parseFloat(amount);
         await user.save();
-        
         res.status(200).json({ message: "Balance updated successfully!", balance: user.balance });
     } catch (err) { res.status(500).json({ error: "Failed to update balance." }); }
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+    try {
+        await User.findByIdAndDelete(req.params.id);
+        res.status(200).json({ message: "User deleted." });
+    } catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
+});
+
+app.get('/api/admin/transactions', async (req, res) => {
+    try {
+        const statusFilter = req.query.status || 'Pending';
+        const txns = await Transaction.find({ status: statusFilter })
+                                      .populate('userId', 'username')
+                                      .sort({ date: -1 });
+        res.status(200).json(txns);
+    } catch (err) { res.status(500).json({ error: "Failed to fetch transactions." }); }
+});
+
+app.put('/api/admin/transactions/:id/:action', async (req, res) => {
+    try {
+        const action = req.params.action.toLowerCase();
+        const txn = await Transaction.findById(req.params.id);
+        if (!txn) return res.status(404).json({ error: "Transaction not found." });
+        if (txn.status !== 'Pending') return res.status(400).json({ error: "Transaction already processed." });
+
+        if (action === 'approve') {
+            txn.status = 'Completed';
+            if (txn.type === 'Deposit') {
+                const user = await User.findById(txn.userId);
+                user.balance += txn.amount;
+                await user.save();
+                await new Notification({ userId: user._id, title: "Deposit Approved", message: `Your deposit of ${txn.amount} ${txn.currency} was approved.` }).save();
+            }
+        } else if (action === 'reject') {
+            txn.status = 'Failed';
+            if (txn.type === 'Withdrawal') {
+                const user = await User.findById(txn.userId);
+                user.balance += txn.amount;
+                await user.save();
+                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of ${txn.amount} ${txn.currency} was rejected. Funds returned.` }).save();
+            }
+        }
+
+        await txn.save();
+        res.status(200).json({ message: `Transaction ${action}d.` });
+    } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
 app.post('/api/admin/matches', async (req, res) => {
