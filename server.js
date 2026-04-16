@@ -89,19 +89,25 @@ app.post('/api/auth/register', async (req, res) => {
         
         let currency = 'USD';
         let countryCode = 'US';
-        if(phone.startsWith('+254')) { currency = 'KES'; countryCode = 'KE'; }
-        else if(phone.startsWith('+256')) { currency = 'UGX'; countryCode = 'UG'; }
-        else if(phone.startsWith('+255')) { currency = 'TZS'; countryCode = 'TZ'; }
-        else if(phone.startsWith('+233')) { currency = 'GHS'; countryCode = 'GH'; }
-        else if(phone.startsWith('+260')) { currency = 'ZMW'; countryCode = 'ZM'; }
-        else if(phone.startsWith('+27')) { currency = 'ZAR'; countryCode = 'ZA'; }
-        else if(phone.startsWith('+44')) { currency = 'GBP'; countryCode = 'GB'; }
-        else if(phone.startsWith('+49')) { currency = 'EUR'; countryCode = 'DE'; }
+        
+        // Smart Kenyan Number Detection
+        const cleanPhone = phone.replace(/\D/g, '');
+        const isKenyan = phone.startsWith('+254') || 
+                         cleanPhone.startsWith('254') || 
+                         (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
+
+        if (isKenyan) {
+            currency = 'KES'; 
+            countryCode = 'KE';
+        } else {
+            currency = 'USD'; 
+            countryCode = 'US';
+        }
 
         const newUser = new User({ 
             username, email, phone, 
             password: hashedPassword, 
-            name: username, // Explicitly map username to name
+            name: username, 
             currency, countryCode 
         });
         await newUser.save();
@@ -109,7 +115,6 @@ app.post('/api/auth/register', async (req, res) => {
         // Welcome Notification
         await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready. Deposit now to start betting." }).save();
 
-        // Fixed payload: Include name, username, and oddsFormat explicitly
         res.status(201).json({ 
             message: "User created", 
             user: { 
@@ -154,7 +159,6 @@ app.post('/api/auth/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(400).json({ error: "Invalid password." });
 
-        // Fixed payload: Include name, username, and oddsFormat explicitly
         res.status(200).json({ 
             message: "Login successful", 
             user: { 
@@ -236,6 +240,13 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790a
 app.get('/api/live-matches', async (req, res) => {
     try {
         const userCountry = req.query.countryCode || 'GB'; 
+        
+        // Timezone Mapping based on requested country code
+        let timezone = 'UTC';
+        if(userCountry === 'KE' || userCountry === 'UG' || userCountry === 'TZ') timezone = 'Africa/Nairobi';
+        else if(userCountry === 'US') timezone = 'America/New_York';
+        else if(userCountry === 'GB') timezone = 'Europe/London';
+        else if(userCountry === 'ZA') timezone = 'Africa/Johannesburg';
 
         const now = new Date();
         const nextMonth = new Date();
@@ -243,7 +254,12 @@ app.get('/api/live-matches', async (req, res) => {
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextMonth.toISOString().split('.')[0] + 'Z';
 
-        const sportsToFetch = ['soccer_epl', 'soccer_uefa_champs_league', 'basketball_nba', 'tennis_atp', 'mma_mixed_martial_arts'];
+        // Increased massive fetch volume
+        const sportsToFetch = [
+            'soccer_epl', 'soccer_uefa_champs_league', 'soccer_italy_serie_a', 
+            'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one',
+            'basketball_nba', 'tennis_atp', 'mma_mixed_martial_arts', 'americanfootball_nfl'
+        ];
         
         let allApiMatches = [];
 
@@ -272,11 +288,16 @@ app.get('/api/live-matches', async (req, res) => {
             const matchDate = new Date(match.commence_time);
             const isLiveNow = matchDate <= new Date();
             const mockScore = isLiveNow ? `${Math.floor(Math.random()*3)}-${Math.floor(Math.random()*3)}` : null;
+            
+            // Format time natively by Timezone mapping
+            let formattedTime = matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false });
+            let formattedDate = matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' });
 
             let mappedSport = 'football';
             if(match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if(match.sport_key.includes('tennis')) mappedSport = 'tennis';
             if(match.sport_key.includes('mma')) mappedSport = 'mma';
+            if(match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
 
             let gradeScore = 0;
             if(isLiveNow) gradeScore += 100;
@@ -288,13 +309,13 @@ app.get('/api/live-matches', async (req, res) => {
                 sport: mappedSport,
                 region: 'Global',
                 league: match.sport_title,
-                country: mappedSport === 'basketball' ? 'us' : 'gb-eng',
+                country: mappedSport === 'basketball' || mappedSport === 'rugby' ? 'us' : 'gb-eng',
                 home: match.home_team,
                 away: match.away_team,
                 isLive: isLiveNow, 
                 isFeatured: gradeScore > 50,
-                time: matchDate.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                date: matchDate.toLocaleDateString(),
+                time: formattedTime, // Dynamically adjusted Timezone
+                date: formattedDate,
                 score: mockScore,
                 odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30,
@@ -302,8 +323,9 @@ app.get('/api/live-matches', async (req, res) => {
             };
         });
 
+        // Expanded max return pool to 300
         formattedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
-        res.status(200).json(formattedMatches.slice(0, 100)); 
+        res.status(200).json(formattedMatches.slice(0, 300)); 
     } catch (err) {
         res.status(500).json({ error: "Could not fetch live matches." });
     }
