@@ -4,7 +4,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
-const axios = require('axios'); // Added missing axios import
+const axios = require('axios');
 
 const app = express();
 app.use(express.json());
@@ -16,6 +16,40 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sportywins
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
   .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+// ==========================================
+// TELEGRAM BOT NOTIFICATION HELPER
+// ==========================================
+const sendTelegramMessage = async (message) => {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_CHAT_ID;
+    
+    if (!token || !chatId) {
+        console.log("Telegram credentials missing. Skipping notification.");
+        return;
+    }
+
+    try {
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+            chat_id: chatId,
+            text: message,
+            parse_mode: 'HTML'
+        });
+    } catch (err) {
+        console.error("❌ Telegram notification failed:", err.message);
+    }
+};
+
+// ==========================================
+// CRYPTO ADDRESSES FROM .ENV
+// ==========================================
+const getCryptoAddresses = () => ({
+    Bitcoin: process.env.BTC_ADDRESS || 'bc1q_configure_in_env',
+    USDT: process.env.USDT_ADDRESS || '0x_configure_in_env',
+    USDC: process.env.USDC_ADDRESS || '0x_configure_in_env',
+    Solana: process.env.SOLANA_ADDRESS || 'sol_configure_in_env',
+    Litecoin: process.env.LTC_ADDRESS || 'ltc_configure_in_env'
+});
 
 // 2. Define Database Schemas
 
@@ -95,8 +129,8 @@ app.post('/api/deposit', async (req, res) => {
 
         const reference = "DEP" + Date.now();
         const payload = {
-            api_key: "MGPYnwLXMM2V", 
-            email: "kanyingiwaitara@gmail.com", 
+            api_key: process.env.MEGAPAY_API_KEY || "MGPYnwLXMM2V", 
+            email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", 
             amount: amount, 
             msisdn: formattedPhone,
             callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
@@ -161,8 +195,11 @@ app.post('/api/megapay/webhook', async (req, res) => {
         await new Notification({ 
             userId: user._id, 
             title: "Deposit Successful", 
-            message: `Your M-Pesa deposit of KES ${amount} has been credited. Receipt: ${receipt}` 
+            message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}` 
         }).save();
+
+        // Telegram Notification
+        sendTelegramMessage(`💵 <b>SUCCESSFUL DEPOSIT</b>\n📱 User: ${user.phone}\n💰 Amount: KES ${amount}\n🧾 Ref: ${receipt}`);
 
     } catch (err) {
         console.error("Webhook processing error:", err);
@@ -207,6 +244,7 @@ app.post('/api/auth/register', async (req, res) => {
 
         // Welcome Notification
         await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready. Deposit now to start betting." }).save();
+        sendTelegramMessage(`🎉 <b>NEW USER REGISTERED</b>\n👤 User: ${username}\n🌍 Country: ${countryCode}`);
 
         res.status(201).json({ 
             message: "User created", 
@@ -219,7 +257,8 @@ app.post('/api/auth/register', async (req, res) => {
                 balance: newUser.balance, 
                 currency: newUser.currency, 
                 countryCode: newUser.countryCode,
-                oddsFormat: newUser.oddsFormat
+                oddsFormat: newUser.oddsFormat,
+                cryptoAddresses: getCryptoAddresses()
             } 
         });
     } catch (err) {
@@ -231,7 +270,7 @@ app.post('/api/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
         
-        // Flexible Phone Matching Logic: Extracts the last 9 digits of the input
+        // Flexible Phone Matching Logic
         const digitsOnly = identifier.replace(/\D/g, '');
         let phoneQuery = identifier;
         if (digitsOnly.length >= 9) {
@@ -263,7 +302,8 @@ app.post('/api/auth/login', async (req, res) => {
                 balance: user.balance, 
                 currency: user.currency, 
                 countryCode: user.countryCode,
-                oddsFormat: user.oddsFormat
+                oddsFormat: user.oddsFormat,
+                cryptoAddresses: getCryptoAddresses()
             } 
         });
     } catch (err) {
@@ -276,7 +316,11 @@ app.get('/api/user/:id/profile', async (req, res) => {
     try {
         const user = await User.findById(req.params.id).select('-password');
         if(!user) return res.status(404).json({error: "User not found"});
-        res.status(200).json(user);
+        
+        const userPayload = user.toObject();
+        userPayload.cryptoAddresses = getCryptoAddresses();
+        
+        res.status(200).json(userPayload);
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
@@ -297,6 +341,8 @@ app.post('/api/wallet/deposit/manual', async (req, res) => {
         
         const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending' });
         await txn.save();
+        
+        sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT PENDING</b>\n👤 User: ${user.username}\n💳 Method: ${method}\n💰 Amount: ${amount} ${currency}`);
 
         res.status(200).json({ message: "Deposit requested successfully. Pending admin approval.", balance: user.balance });
     } catch (err) { res.status(500).json({ error: "Deposit failed." }); }
@@ -314,6 +360,8 @@ app.post('/api/wallet/withdraw', async (req, res) => {
 
         const txn = new Transaction({ userId, type: 'Withdrawal', amount, currency, status: 'Pending' });
         await txn.save();
+        
+        sendTelegramMessage(`💸 <b>WITHDRAWAL REQUEST</b>\n👤 User: ${user.username}\n📞 Phone: ${user.phone}\n💳 Dest: ${accountDetails}\n💰 Amount: ${amount} ${currency}`);
 
         res.status(200).json({ message: "Withdrawal requested successfully", balance: user.balance });
     } catch (err) { res.status(500).json({ error: "Withdrawal failed." }); }
@@ -459,8 +507,9 @@ app.post('/api/bets/place', async (req, res) => {
         });
         await newBet.save();
 
-        const txn = new Transaction({ userId, type: 'Bet Placed', amount: -stake, currency, status: 'Completed' });
-        await txn.save();
+        await Transaction.create({ userId, type: 'Bet Placed', amount: -stake, currency, status: 'Completed' });
+        
+        sendTelegramMessage(`🎲 <b>NEW BET PLACED</b>\n👤 User: ${user.username}\n💰 Stake: ${stake} ${currency}\n🎯 Potential Win: ${potentialReturn} ${currency}\n🎫 Legs: ${legs.length}`);
 
         res.status(201).json({ message: "Bet placed successfully!", ticketId: newBet.ticketId, newBalance: user.balance });
     } catch (err) { res.status(500).json({ error: "Failed to place bet." }); }
