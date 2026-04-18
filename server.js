@@ -623,7 +623,7 @@ app.put('/api/admin/matches/:id/result', async (req, res) => {
     try {
         const { score, isLive } = req.body;
         const match = await Match.findByIdAndUpdate(
-            req.params.id, 
+            req.params.id,  
             { score: score, isLive: isLive }, 
             { new: true }
         );
