@@ -4,6 +4,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
+const axios = require('axios'); // Added missing axios import
 
 const app = express();
 app.use(express.json());
@@ -53,13 +54,16 @@ const BetSchema = new mongoose.Schema({
 });
 const Bet = mongoose.model('Bet', BetSchema);
 
-// Transaction Schema
+// Transaction Schema - Updated to support MegaPay Webhook data
 const TransactionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Made optional for webhook flexibility
+    userPhone: String, // Added for webhook lookup
+    refId: String,     // Added for MegaPay receipt tracking
     type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win
+    method: String,    // E.g., M-Pesa
     amount: { type: Number, required: true },
-    currency: String,
-    status: { type: String, default: 'Pending' }, // Pending, Completed, Failed
+    currency: { type: String, default: 'KES' },
+    status: { type: String, default: 'Pending' }, // Pending, Success, Failed
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
@@ -76,6 +80,95 @@ const Notification = mongoose.model('Notification', NotificationSchema);
 
 
 // 3. API ROUTES
+
+// --- MEGAPAY INTEGRATION ---
+app.post('/api/deposit', async (req, res) => {
+    try {
+        const { userPhone, amount, method } = req.body;
+        if (amount < 10) return res.status(400).json({ success: false, message: 'Minimum deposit is 10 KES.' });
+        const user = await User.findOne({ phone: userPhone });
+        if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+        let formattedPhone = userPhone.replace(/\D/g, ''); 
+        if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
+        if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
+
+        const reference = "DEP" + Date.now();
+        const payload = {
+            api_key: "MGPYnwLXMM2V", 
+            email: "kanyingiwaitara@gmail.com", 
+            amount: amount, 
+            msisdn: formattedPhone,
+            callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
+            description: "Sportwins Deposit", 
+            reference: reference
+        };
+
+        await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload);
+        
+        // Save initial pending transaction
+        await Transaction.create({ 
+            refId: reference, 
+            userId: user._id,
+            userPhone: user.phone, 
+            type: 'deposit', 
+            method: method || 'M-Pesa', 
+            amount: Number(amount), 
+            status: 'Pending' 
+        });
+
+        res.status(200).json({ success: true, message: "STK Push Sent! Check your phone.", newBalance: user.balance, refId: reference });
+    } catch (error) { 
+        console.error("MegaPay Initiation Error:", error.message);
+        res.status(500).json({ success: false, message: "Payment Gateway Error." }); 
+    }
+});
+
+app.post('/api/megapay/webhook', async (req, res) => {
+    // Immediately acknowledge receipt to MegaPay to prevent retries
+    res.status(200).send("OK");
+    
+    const data = req.body;
+    try {
+        if ((data.ResponseCode !== undefined ? data.ResponseCode : data.ResultCode) != 0) return; 
+
+        const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
+        const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
+        let rawPhone = (data.Msisdn || data.phone || data.PhoneNumber).toString();
+        let phone0 = rawPhone.startsWith('254') ? '0' + rawPhone.substring(3) : rawPhone;
+        let phone254 = rawPhone.startsWith('0') ? '254' + rawPhone.substring(1) : rawPhone;
+
+        const user = await User.findOne({ $or: [{ phone: phone0 }, { phone: phone254 }, { phone: rawPhone }] });
+        if (!user) return;
+        
+        const existingTx = await Transaction.findOne({ refId: receipt });
+        if (existingTx) return;
+
+        user.balance += amount; 
+        await user.save();
+        
+        await Transaction.create({ 
+            refId: receipt, 
+            userId: user._id,
+            userPhone: user.phone, 
+            type: "Deposit", 
+            method: "M-Pesa", 
+            amount: amount, 
+            status: "Success" 
+        });
+        
+        // Internal Notification
+        await new Notification({ 
+            userId: user._id, 
+            title: "Deposit Successful", 
+            message: `Your M-Pesa deposit of KES ${amount} has been credited. Receipt: ${receipt}` 
+        }).save();
+
+    } catch (err) {
+        console.error("Webhook processing error:", err);
+    }
+});
+
 
 // --- AUTHENTICATION ---
 app.post('/api/auth/register', async (req, res) => {
@@ -195,14 +288,14 @@ app.get('/api/user/:id/notifications', async (req, res) => {
 });
 
 
-// --- WALLET & TRANSACTIONS ---
-app.post('/api/wallet/deposit', async (req, res) => {
+// --- LEGACY WALLET BACKUP (Manual/Crypto logic) ---
+app.post('/api/wallet/deposit/manual', async (req, res) => {
     try {
         const { userId, amount, currency, method } = req.body;
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         
-        const txn = new Transaction({ userId, type: 'Deposit', amount, currency, status: 'Pending' });
+        const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending' });
         await txn.save();
 
         res.status(200).json({ message: "Deposit requested successfully. Pending admin approval.", balance: user.balance });
@@ -254,7 +347,6 @@ app.get('/api/live-matches', async (req, res) => {
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextMonth.toISOString().split('.')[0] + 'Z';
 
-        // Increased massive fetch volume
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_italy_serie_a', 
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one',
@@ -323,7 +415,6 @@ app.get('/api/live-matches', async (req, res) => {
             };
         });
 
-        // Expanded max return pool to 300
         formattedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
         res.status(200).json(formattedMatches.slice(0, 300)); 
     } catch (err) {
