@@ -212,8 +212,15 @@ app.post('/api/auth/register', async (req, res) => {
     try {
         const { username, email, phone, password } = req.body;
         
-        const existingUser = await User.findOne({ $or: [{ phone }, { email }, { username }] });
-        if (existingUser) return res.status(400).json({ error: "Username, Email, or Phone already registered." });
+        // Strict case-insensitive check for uniqueness
+        const existingUsername = await User.findOne({ username: { $regex: new RegExp('^' + username + '$', 'i') } });
+        if (existingUsername) return res.status(400).json({ error: "Username is already taken." });
+
+        const existingEmail = await User.findOne({ email: { $regex: new RegExp('^' + email + '$', 'i') } });
+        if (existingEmail) return res.status(400).json({ error: "Email is already registered." });
+
+        const existingPhone = await User.findOne({ phone });
+        if (existingPhone) return res.status(400).json({ error: "Phone number is already registered." });
 
         const hashedPassword = await bcrypt.hash(password, 10);
         
@@ -227,8 +234,6 @@ app.post('/api/auth/register', async (req, res) => {
         await newUser.save();
 
         await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready. Deposit now to start betting." }).save();
-        
-        // TELEGRAM NOTIFICATION ON NEW REGISTRATION
         sendTelegramMessage(`🎉 <b>NEW USER REGISTERED</b>\n👤 User: ${username}\n📞 Phone: ${phone}\n🌍 Country: ${countryCode}`);
 
         res.status(201).json({ 
@@ -254,14 +259,21 @@ app.post('/api/auth/login', async (req, res) => {
             phoneQuery = { $regex: new RegExp(digitsOnly.slice(-9) + '$') };
         }
 
+        // Case-insensitive lookup for username or email
         const user = await User.findOne({ 
-            $or: [{ email: identifier }, { username: identifier }, { phone: phoneQuery }, { phone: identifier }] 
+            $or: [
+                { email: { $regex: new RegExp('^' + identifier + '$', 'i') } }, 
+                { username: { $regex: new RegExp('^' + identifier + '$', 'i') } }, 
+                { phone: phoneQuery }, 
+                { phone: identifier }
+            ] 
         });
 
-        if (!user) return res.status(400).json({ error: "User not found. Check your details." });
+        // Exact error separation
+        if (!user) return res.status(404).json({ error: "User not registered. Please check your details." });
 
         const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(400).json({ error: "Invalid password." });
+        if (!isMatch) return res.status(401).json({ error: "Wrong password." });
 
         res.status(200).json({ 
             message: "Login successful", 
@@ -411,8 +423,43 @@ app.get('/api/live-matches', async (req, res) => {
             };
         });
 
-        formattedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
-        res.status(200).json(formattedMatches.slice(0, 300)); 
+        // MERGING ADMIN INJECTED MATCHES
+        let dbMatches = [];
+        try {
+            // Fetch any matches created via the Admin panel in the database
+            const dbRes = await Match.find({}); 
+            dbMatches = dbRes.map(dbMatch => {
+                // Ensure DB matches have the same format structure as API matches
+                return {
+                    id: dbMatch._id.toString(),
+                    sport: dbMatch.sport || 'football',
+                    region: 'Custom',
+                    league: dbMatch.league || 'Custom League',
+                    country: dbMatch.country || 'gb-eng',
+                    home: dbMatch.home,
+                    away: dbMatch.away,
+                    isLive: dbMatch.isLive || false,
+                    isFeatured: true, // Give admin games high priority
+                    time: dbMatch.time || '15:00',
+                    date: dbMatch.date || new Date().toLocaleDateString(),
+                    score: dbMatch.score || null,
+                    odds: dbMatch.odds || [2.10, 3.10, 2.80],
+                    marketCount: dbMatch.markets ? Object.keys(dbMatch.markets).length : 50,
+                    gradeScore: 1000, // Force admin games to the absolute top of the feed
+                    detailedMarkets: dbMatch.markets || {}
+                };
+            });
+        } catch (e) {
+            console.error("Failed to merge DB matches:", e);
+        }
+
+        // Combine DB Matches (Admin) with API Matches
+        const combinedMatches = [...dbMatches, ...formattedMatches];
+
+        // Sort by Grade Score
+        combinedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
+        
+        res.status(200).json(combinedMatches.slice(0, 300)); 
     } catch (err) {
         res.status(500).json({ error: "Could not fetch live matches." });
     }
