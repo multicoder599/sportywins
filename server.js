@@ -89,20 +89,20 @@ const BetSchema = new mongoose.Schema({
 const Bet = mongoose.model('Bet', BetSchema);
 
 const TransactionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
-    userPhone: String, 
-    refId: String,     
-    type: { type: String, required: true }, 
-    method: String,    
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Made optional for webhook flexibility
+    userPhone: String, // Added for webhook lookup
+    refId: String,     // Added for MegaPay receipt tracking
+    type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win
+    method: String,    // E.g., M-Pesa
     amount: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
-    status: { type: String, default: 'Pending' }, 
+    status: { type: String, default: 'Pending' }, // Pending, Success, Failed
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
 const NotificationSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Null means global
     title: String,
     message: String,
     isRead: { type: Boolean, default: false },
@@ -474,11 +474,99 @@ app.get('/api/bets/user/:userId', async (req, res) => {
 
 
 // --- ADMIN ROUTES ---
+app.get('/api/matches', async (req, res) => {
+    try {
+        const matches = await Match.find();
+        res.status(200).json(matches);
+    } catch (err) { res.status(500).json({ error: "Could not fetch DB matches." }); }
+});
+
 app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find().select('-password'); 
         res.status(200).json(users);
     } catch (err) { res.status(500).json({ error: "Failed to fetch users." }); }
+});
+
+app.put('/api/admin/users/:id/balance/set', async (req, res) => {
+    try {
+        const { amount } = req.body;
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ error: "User not found." });
+        
+        user.balance = parseFloat(amount);
+        await user.save();
+        res.status(200).json({ message: "Balance updated successfully!", balance: user.balance });
+    } catch (err) { res.status(500).json({ error: "Failed to update balance." }); }
+});
+
+app.delete('/api/admin/users/:id', async (req, res) => {
+    try {
+        await User.findByIdAndDelete(req.params.id);
+        res.status(200).json({ message: "User deleted." });
+    } catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
+});
+
+app.get('/api/admin/transactions', async (req, res) => {
+    try {
+        const statusFilter = req.query.status || 'Pending';
+        const txns = await Transaction.find({ status: statusFilter })
+                                      .populate('userId', 'username')
+                                      .sort({ date: -1 });
+        res.status(200).json(txns);
+    } catch (err) { res.status(500).json({ error: "Failed to fetch transactions." }); }
+});
+
+app.put('/api/admin/transactions/:id/:action', async (req, res) => {
+    try {
+        const action = req.params.action.toLowerCase();
+        const txn = await Transaction.findById(req.params.id);
+        if (!txn) return res.status(404).json({ error: "Transaction not found." });
+        if (txn.status !== 'Pending') return res.status(400).json({ error: "Transaction already processed." });
+
+        if (action === 'approve') {
+            txn.status = 'Completed';
+            if (txn.type === 'Deposit') {
+                const user = await User.findById(txn.userId);
+                user.balance += txn.amount;
+                await user.save();
+                await new Notification({ userId: user._id, title: "Deposit Approved", message: `Your deposit of ${txn.amount} ${txn.currency} was approved.` }).save();
+            }
+        } else if (action === 'reject') {
+            txn.status = 'Failed';
+            if (txn.type === 'Withdrawal') {
+                const user = await User.findById(txn.userId);
+                user.balance += txn.amount;
+                await user.save();
+                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of ${txn.amount} ${txn.currency} was rejected. Funds returned.` }).save();
+            }
+        }
+
+        await txn.save();
+        res.status(200).json({ message: `Transaction ${action}d.` });
+    } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
+});
+
+app.post('/api/admin/matches', async (req, res) => {
+    try {
+        const newMatch = new Match(req.body);
+        await newMatch.save();
+        res.status(201).json({ message: "Match injected successfully!", match: newMatch });
+    } catch (err) { res.status(500).json({ error: "Failed to add match." }); }
+});
+
+app.delete('/api/admin/matches/:id', async (req, res) => {
+    try {
+        await Match.findByIdAndDelete(req.params.id);
+        res.status(200).json({ message: "Match deleted." });
+    } catch (err) { res.status(500).json({ error: "Failed to delete match." }); }
+});
+
+app.get('/api/admin/bets', async (req, res) => {
+    try {
+        const bets = await Bet.find().populate('userId', 'username phone').sort({ date: -1 });
+        res.status(200).json(bets);
+    } catch (err) { res.status(500).json({ error: "Failed to fetch all bets." }); }
 });
 
 app.put('/api/admin/matches/:id/result', async (req, res) => {
@@ -530,7 +618,6 @@ setInterval(async () => {
                         // CHECK ADMIN INJECTION: Check if Admin set a score in DB
                         let dbMatch = null;
                         try {
-                            // Try to look up by ID if it's a MongoDB ID, or fallback to team name
                             if (mongoose.Types.ObjectId.isValid(leg.id)) {
                                 dbMatch = await Match.findById(leg.id);
                             }
