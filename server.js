@@ -82,7 +82,7 @@ const BetSchema = new mongoose.Schema({
     stake: { type: Number, required: true },
     totalOdds: { type: Number, required: true },
     potentialReturn: { type: Number, required: true },
-    status: { type: String, default: 'Open' }, // Open, Won, Lost
+    status: { type: String, default: 'Open' }, // Open, Won, Lost, Cancelled
     currency: String,
     legs: Array
 });
@@ -92,11 +92,11 @@ const TransactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Made optional for webhook flexibility
     userPhone: String, // Added for webhook lookup
     refId: String,     // Added for MegaPay receipt tracking
-    type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win
-    method: String,    // E.g., M-Pesa
+    type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win, Refund
+    method: String,    // E.g., M-Pesa, Crypto
     amount: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
-    status: { type: String, default: 'Pending' }, // Pending, Success, Failed
+    status: { type: String, default: 'Pending' }, // Pending, Success, Failed, Completed
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
@@ -312,14 +312,17 @@ app.get('/api/user/:id/notifications', async (req, res) => {
 // --- MANUAL/CRYPTO DEPOSIT & WITHDRAWAL ---
 app.post('/api/wallet/deposit/manual', async (req, res) => {
     try {
-        const { userId, amount, currency, method } = req.body;
+        const { userId, amount, currency, method, proofSubmitted } = req.body;
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         
-        const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending' });
+        // Add proof flag if it came from the screenshot modal
+        const proofStatus = proofSubmitted ? 'Proof Submitted' : 'Pending';
+
+        const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending', proofUrl: proofStatus });
         await txn.save();
         
-        sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT PENDING</b>\n👤 User: ${user.username}\n💳 Method: ${method}\n💰 Amount: ${amount} ${currency}`);
+        sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT PENDING</b>\n👤 User: ${user.username}\n💳 Method: ${method}\n💰 Amount: ${amount} ${currency}\n🖼️ Proof: ${proofStatus}`);
 
         res.status(200).json({ message: "Deposit requested successfully. Pending admin approval.", balance: user.balance });
     } catch (err) { res.status(500).json({ error: "Deposit failed." }); }
@@ -615,6 +618,43 @@ app.get('/api/admin/bets', async (req, res) => {
         res.status(200).json(bets);
     } catch (err) { res.status(500).json({ error: "Failed to fetch all bets." }); }
 });
+
+// Admin Route to Cancel and Refund Bet
+app.put('/api/admin/bets/:id/cancel', async (req, res) => {
+    try {
+        const bet = await Bet.findById(req.params.id);
+        if (!bet) return res.status(404).json({ error: "Bet not found." });
+        if (bet.status !== 'Open') return res.status(400).json({ error: "Only open bets can be cancelled." });
+
+        bet.status = 'Cancelled';
+        await bet.save();
+
+        const user = await User.findById(bet.userId);
+        if (user) {
+            user.balance += bet.stake; // Refund stake
+            await user.save();
+
+            await Transaction.create({
+                userId: user._id,
+                type: 'Refund',
+                amount: bet.stake,
+                currency: bet.currency,
+                status: 'Completed'
+            });
+
+            await new Notification({
+                userId: user._id,
+                title: "Bet Cancelled",
+                message: `Your bet ${bet.ticketId} was cancelled by administration and your stake of ${bet.stake} ${bet.currency} has been refunded.`
+            }).save();
+        }
+
+        res.status(200).json({ message: "Bet cancelled and stake refunded.", bet });
+    } catch (err) {
+        res.status(500).json({ error: "Failed to cancel bet." });
+    }
+});
+
 
 app.put('/api/admin/matches/:id/result', async (req, res) => {
     try {
