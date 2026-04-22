@@ -5,18 +5,42 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const axios = require('axios');
-const jwt = require('jsonwebtoken'); // 🔒 New: For securing admin routes
-const helmet = require('helmet'); // 🔒 New: Secures HTTP headers
-const rateLimit = require('express-rate-limit'); // 🔒 New: Prevents brute-force
-const mongoSanitize = require('express-mongo-sanitize'); // 🔒 New: Prevents NoSQL Injection
+const jwt = require('jsonwebtoken'); // 🔒 For securing admin routes
+const helmet = require('helmet'); // 🔒 Secures HTTP headers
+const rateLimit = require('express-rate-limit'); // 🔒 Prevents brute-force
+const mongoSanitize = require('express-mongo-sanitize'); // 🔒 Prevents NoSQL Injection
 
 const app = express();
 
+// 🔒 CRITICAL FOR RENDER: Tells Express to trust the Render load balancer.
+// Without this, the rate limiter will block everyone after 10 requests.
+app.set('trust proxy', 1);
+
 // --- SECURITY MIDDLEWARE INITIALIZATION ---
-app.use(helmet()); // Set secure HTTP headers
-app.use(cors()); 
+app.use(helmet()); 
 app.use(express.json());
-app.use(mongoSanitize()); // Prevent NoSQL injection attacks
+app.use(mongoSanitize());
+
+// 🔒 EXPLICIT CORS POLICY
+const allowedOrigins = [
+    'https://sportywins.onrender.com', // Main user frontend (Update if you moved this too)
+    'https://winsadmin.surge.sh',      // Your new Admin Command Center
+    'http://localhost:3000',           // For local testing
+    'http://127.0.0.1:5500'            // VS Code Live Server testing
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+        // allow requests with no origin (like mobile apps or curl requests)
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
+    },
+    credentials: true
+}));
 
 // General API Rate Limiter (Max 200 requests per 15 minutes per IP)
 const apiLimiter = rateLimit({
@@ -113,7 +137,7 @@ const TransactionSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
     status: { type: String, default: 'Pending' }, 
-    proofUrl: String, // Added to store screenshot state
+    proofUrl: String, 
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
@@ -139,7 +163,6 @@ const verifyAdminToken = (req, res, next) => {
     if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
 
     try {
-        // Token comes in format "Bearer <token>"
         const tokenParts = token.split(" ");
         const actualToken = tokenParts.length === 2 ? tokenParts[1] : tokenParts[0];
 
@@ -150,7 +173,7 @@ const verifyAdminToken = (req, res, next) => {
         }
         
         req.admin = verified;
-        next(); // Proceed to the protected route
+        next(); 
     } catch (err) {
         return res.status(401).json({ error: "Invalid or expired token." });
     }
@@ -159,7 +182,7 @@ const verifyAdminToken = (req, res, next) => {
 // 3. API ROUTES
 
 // --- ADMIN LOGIN ROUTE (GENERATES JWT) ---
-// Strict Rate Limiter for Admin Login (Prevents Brute Force)
+// Strict Rate Limiter for Admin Login
 const adminLoginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 10, 
@@ -168,10 +191,9 @@ const adminLoginLimiter = rateLimit({
 
 app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     const { password } = req.body;
-    const adminPass = process.env.ADMIN_PASS || 'admin@26wins'; // Set this securely in Render Environment
+    const adminPass = process.env.ADMIN_PASS || 'admin@26wins'; 
 
     if (password === adminPass) {
-        // Generate Token valid for 24 hours
         const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
         res.status(200).json({ message: "Auth successful", token: token });
     } else {
@@ -275,9 +297,8 @@ app.post('/api/megapay/webhook', async (req, res) => {
 
 
 // --- AUTHENTICATION ---
-// Rate limit registration to prevent spam accounts
 const authLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, // 1 hour
+    windowMs: 60 * 60 * 1000, 
     max: 15, 
     message: { error: "Too many accounts created from this IP, please try again later." }
 });
