@@ -311,19 +311,13 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
         res.status(200).json(txns);
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
-
+// --- REAL-TIME ODDS API INTEGRATION (Paid Tier - Direct Fetch) ---
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
-
-app.get('/api/matches', async (req, res) => {
-    try {
-        const matches = await Match.find().sort({ _id: -1 });
-        res.status(200).json(matches);
-    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
-});
 
 app.get('/api/live-matches', async (req, res) => {
     try {
         const userCountry = req.query.countryCode || 'GB'; 
+        
         let timezone = 'UTC';
         if(userCountry === 'KE' || userCountry === 'UG' || userCountry === 'TZ') timezone = 'Africa/Nairobi';
         else if(userCountry === 'US') timezone = 'America/New_York';
@@ -332,7 +326,7 @@ app.get('/api/live-matches', async (req, res) => {
 
         const now = new Date();
         const nextWeek = new Date();
-        nextWeek.setDate(now.getDate() + 7);
+        nextWeek.setDate(now.getDate() + 7); // 7-day timeframe
         
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
@@ -347,14 +341,18 @@ app.get('/api/live-matches', async (req, res) => {
         
         let allApiMatches = [];
 
+        // Direct fetch without caching
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                const response = await fetch(`https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${ODDS_API_KEY}&regions=uk&markets=h2h&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    allApiMatches = allApiMatches.concat(data);
+                const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${ODDS_API_KEY}&regions=uk&markets=h2h&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`;
+                const response = await axios.get(url);
+                if (response.data) {
+                    allApiMatches = allApiMatches.concat(response.data);
                 }
-            } catch(e) {}
+            } catch(e) {
+                // If the paid API throws an error (e.g., key issue or sport inactive), it will show in Render logs
+                console.error(`Odds API Error for ${sportKey}:`, e.response ? e.response.data : e.message);
+            }
         }));
         
         let formattedMatches = allApiMatches.map((match) => {
@@ -382,12 +380,10 @@ app.get('/api/live-matches', async (req, res) => {
             if(match.sport_key.includes('mma')) mappedSport = 'mma';
             if(match.sport_key.includes('rugby') || match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
 
-            let gradeScore = 0;
-            if(isLiveNow) gradeScore += 200;
+            // Football/Live Prioritization
+            let gradeScore = isLiveNow ? 200 : 0;
             if(mappedSport === 'football') gradeScore += 50; 
             if(match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
-            if(userCountry === 'GB' && match.sport_key.includes('epl')) gradeScore += 50;
-            if(userCountry === 'US' && match.sport_key.includes('nba')) gradeScore += 50;
 
             return {
                 id: match.id, sport: mappedSport, region: 'Global', league: match.sport_title, country: mappedSport === 'basketball' || mappedSport === 'rugby' ? 'us' : 'gb-eng',
@@ -411,13 +407,16 @@ app.get('/api/live-matches', async (req, res) => {
                     gradeScore: 1000, detailedMarkets: dbMatch.markets || {}
                 };
             });
-        } catch (e) {}
+        } catch (e) {
+            console.error("Failed to load manual DB matches:", e);
+        }
 
         const combinedMatches = [...dbMatches, ...formattedMatches];
         combinedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
         
         res.status(200).json(combinedMatches.slice(0, 300)); 
     } catch (err) {
+        console.error("Live Matches Route Error:", err);
         res.status(500).json({ error: "Could not fetch live matches." });
     }
 });
