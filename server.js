@@ -1,3 +1,4 @@
+// server.js
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -11,13 +12,10 @@ const mongoSanitize = require('express-mongo-sanitize');
 
 const app = express();
 
-// 🔒 CRITICAL FOR RENDER: Tells Express to trust the Render load balancer.
 app.set('trust proxy', 1);
-
 app.use(helmet()); 
 app.use(express.json());
 
-// 🔒 EXPRESS 5 BUG FIX: Make req.query writable for mongo-sanitize
 app.use((req, res, next) => {
     Object.defineProperty(req, 'query', {
         value: { ...req.query },
@@ -28,7 +26,6 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
-// 🔒 EXPLICIT CORS POLICY
 const allowedOrigins = [
     'https://sportywins.onrender.com', 
     'https://winsadmin.surge.sh',      
@@ -311,76 +308,82 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
         res.status(200).json(txns);
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
-// --- REAL-TIME ODDS API INTEGRATION (Paid Tier - Direct Fetch) ---
+
+// ==========================================
+// 🚀 PAID ODDS API INTEGRATION (Direct Fetch)
+// ==========================================
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
+
+app.get('/api/matches', async (req, res) => {
+    try {
+        const matches = await Match.find().sort({ _id: -1 });
+        res.status(200).json(matches);
+    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
+});
 
 app.get('/api/live-matches', async (req, res) => {
     try {
         const userCountry = req.query.countryCode || 'GB'; 
-        
         let timezone = 'UTC';
-        if(userCountry === 'KE' || userCountry === 'UG' || userCountry === 'TZ') timezone = 'Africa/Nairobi';
+        if(['KE','UG','TZ'].includes(userCountry)) timezone = 'Africa/Nairobi';
         else if(userCountry === 'US') timezone = 'America/New_York';
         else if(userCountry === 'GB') timezone = 'Europe/London';
         else if(userCountry === 'ZA') timezone = 'Africa/Johannesburg';
 
         const now = new Date();
         const nextWeek = new Date();
-        nextWeek.setDate(now.getDate() + 7); // 7-day timeframe
+        nextWeek.setDate(now.getDate() + 7); // Daily to Weekly timeframe
         
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
 
+        // 15 Expanded Popular Sports
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a', 
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_england_championship',
             'basketball_nba', 'basketball_euroleague',
-            'tennis_atp', 'tennis_wta',
-            'mma_mixed_martial_arts', 'americanfootball_nfl', 'rugby_union'
+            'tennis_atp', 'tennis_wta', 'icehockey_nhl',
+            'mma_mixed_martial_arts', 'americanfootball_nfl'
         ];
         
         let allApiMatches = [];
 
-        // Direct fetch without caching
+        // Direct fetch using paid API limits
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                const url = `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${ODDS_API_KEY}&regions=uk&markets=h2h&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`;
-                const response = await axios.get(url);
+                const response = await axios.get(`https://api.the-odds-api.com/v4/sports/${sportKey}/odds/?apiKey=${ODDS_API_KEY}&regions=uk&markets=h2h&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
             } catch(e) {
-                // If the paid API throws an error (e.g., key issue or sport inactive), it will show in Render logs
                 console.error(`Odds API Error for ${sportKey}:`, e.response ? e.response.data : e.message);
             }
         }));
         
         let formattedMatches = allApiMatches.map((match) => {
-            const bookmaker = match.bookmakers[0];
-            const market = bookmaker ? bookmaker.markets[0] : null;
-            
+            const market = match.bookmakers[0]?.markets[0];
             let oddsArray = [2.10, 3.10, 2.80]; 
+            
             if (market && market.outcomes) {
-                const homeOdd = market.outcomes.find(o => o.name === match.home_team)?.price || 2.10;
-                const drawOdd = market.outcomes.find(o => o.name === 'Draw')?.price || null; 
-                const awayOdd = market.outcomes.find(o => o.name === match.away_team)?.price || 2.80;
-                oddsArray = [homeOdd, drawOdd, awayOdd];
+                oddsArray = [
+                    market.outcomes.find(o => o.name === match.home_team)?.price || 2.10,
+                    market.outcomes.find(o => o.name === 'Draw')?.price || null,
+                    market.outcomes.find(o => o.name === match.away_team)?.price || 2.80
+                ];
             }
 
             const matchDate = new Date(match.commence_time);
             const isLiveNow = matchDate <= new Date();
             const mockScore = isLiveNow ? `${Math.floor(Math.random()*3)}-${Math.floor(Math.random()*3)}` : null;
             
-            let formattedTime = matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false });
-            let formattedDate = matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' });
-
             let mappedSport = 'football';
             if(match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if(match.sport_key.includes('tennis')) mappedSport = 'tennis';
             if(match.sport_key.includes('mma')) mappedSport = 'mma';
-            if(match.sport_key.includes('rugby') || match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
+            if(match.sport_key.includes('icehockey')) mappedSport = 'icehockey';
+            if(match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
 
-            // Football/Live Prioritization
+            // Priority Algorithm: Live games and Football rank highest
             let gradeScore = isLiveNow ? 200 : 0;
             if(mappedSport === 'football') gradeScore += 50; 
             if(match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
@@ -388,39 +391,31 @@ app.get('/api/live-matches', async (req, res) => {
             return {
                 id: match.id, sport: mappedSport, region: 'Global', league: match.sport_title, country: mappedSport === 'basketball' || mappedSport === 'rugby' ? 'us' : 'gb-eng',
                 home: match.home_team, away: match.away_team, isLive: isLiveNow, isFeatured: gradeScore > 50,
-                time: formattedTime, date: formattedDate, score: mockScore, odds: oddsArray,
+                time: matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false }), 
+                date: matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' }), 
+                score: mockScore, odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30, gradeScore: gradeScore 
             };
         });
 
         let dbMatches = [];
         try {
-            const dbRes = await Match.find({}); 
-            dbMatches = dbRes.map(dbMatch => {
-                return {
-                    id: dbMatch._id.toString(), sport: dbMatch.sport || 'football', region: 'Custom',
-                    league: dbMatch.league || 'Custom League', country: dbMatch.country || 'gb-eng',
-                    home: dbMatch.home, away: dbMatch.away, isLive: dbMatch.isLive || false,
-                    isFeatured: true, time: dbMatch.time || '15:00', date: dbMatch.date || new Date().toLocaleDateString(),
-                    score: dbMatch.score || null, odds: dbMatch.odds || [2.10, 3.10, 2.80],
-                    marketCount: dbMatch.markets ? Object.keys(dbMatch.markets).length : 50,
-                    gradeScore: 1000, detailedMarkets: dbMatch.markets || {}
-                };
-            });
-        } catch (e) {
-            console.error("Failed to load manual DB matches:", e);
-        }
+            dbMatches = (await Match.find({})).map(m => ({
+                id: m._id.toString(), sport: m.sport || 'football', region: 'Custom', league: m.league || 'League', country: m.country || 'gb-eng',
+                home: m.home, away: m.away, isLive: m.isLive || false, isFeatured: true, time: m.time || '15:00', date: m.date || new Date().toLocaleDateString(),
+                score: m.score || null, odds: m.odds || [2.1, 3.1, 2.8], marketCount: m.markets ? Object.keys(m.markets).length : 50, gradeScore: 1000, detailedMarkets: m.markets || {}
+            }));
+        } catch (e) {}
 
-        const combinedMatches = [...dbMatches, ...formattedMatches];
-        combinedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
-        
-        res.status(200).json(combinedMatches.slice(0, 300)); 
+        const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
+        res.status(200).json(combined.slice(0, 300)); 
     } catch (err) {
-        console.error("Live Matches Route Error:", err);
+        console.error("Live Matches Error:", err);
         res.status(500).json({ error: "Could not fetch live matches." });
     }
 });
 
+// --- SEARCH ENGINE ---
 app.get('/api/search', async (req, res) => {
     try {
         const query = req.query.q;
