@@ -376,6 +376,26 @@ app.get('/api/live-matches', async (req, res) => {
             const isLiveNow = matchDate <= new Date();
             const mockScore = isLiveNow ? `${Math.floor(Math.random()*3)}-${Math.floor(Math.random()*3)}` : null;
             
+            // 🚀 BULLETPROOF "TODAY" / "TOMORROW" MATH LOGIC
+            // Forces standard YYYY-MM-DD format for flawless comparisons
+            const getTzDate = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
+            
+            const matchDay = getTzDate(matchDate);
+            const todayDay = getTzDate(new Date());
+            
+            const tmrw = new Date();
+            tmrw.setDate(tmrw.getDate() + 1);
+            const tomorrowDay = getTzDate(tmrw);
+
+            let formattedTime = matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false });
+            let formattedDate = matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' });
+
+            if (matchDay === todayDay) {
+                formattedDate = 'Today';
+            } else if (matchDay === tomorrowDay) {
+                formattedDate = 'Tomorrow';
+            }
+
             let mappedSport = 'football';
             if(match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if(match.sport_key.includes('tennis')) mappedSport = 'tennis';
@@ -391,9 +411,7 @@ app.get('/api/live-matches', async (req, res) => {
             return {
                 id: match.id, sport: mappedSport, region: 'Global', league: match.sport_title, country: mappedSport === 'basketball' || mappedSport === 'rugby' ? 'us' : 'gb-eng',
                 home: match.home_team, away: match.away_team, isLive: isLiveNow, isFeatured: gradeScore > 50,
-                time: matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false }), 
-                date: matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' }), 
-                score: mockScore, odds: oddsArray,
+                time: formattedTime, date: formattedDate, score: mockScore, odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30, gradeScore: gradeScore 
             };
         });
