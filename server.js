@@ -17,21 +17,15 @@ const app = express();
 app.set('trust proxy', 1);
 
 // --- SECURITY MIDDLEWARE INITIALIZATION ---
-app.use(helmet()); 
-app.use(express.json());
-app.use(mongoSanitize());
-
-// 🔒 EXPLICIT CORS POLICY
-const allowedOrigins = [
-    'https://sportywins.onrender.com', // Main user frontend (Update if you moved this too)
-    'https://winsadmin.surge.sh',      // Your new Admin Command Center
-    'http://localhost:3000',           // For local testing
-    'http://127.0.0.1:5500'            // VS Code Live Server testing
-];
-
+app.use(helmet()); // Set secure HTTP headers
 app.use(cors({
     origin: function (origin, callback) {
-        // allow requests with no origin (like mobile apps or curl requests)
+        const allowedOrigins = [
+            'https://sportywins.onrender.com', 
+            'https://winsadmin.surge.sh',      
+            'http://localhost:3000',           
+            'http://127.0.0.1:5500'            
+        ];
         if (!origin) return callback(null, true);
         if (allowedOrigins.indexOf(origin) === -1) {
             const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
@@ -41,6 +35,20 @@ app.use(cors({
     },
     credentials: true
 }));
+app.use(express.json());
+
+// 🔒 EXPRESS 5 BUG FIX: Make req.query writable for mongo-sanitize
+app.use((req, res, next) => {
+    Object.defineProperty(req, 'query', {
+        value: { ...req.query },
+        writable: true,
+        configurable: true,
+        enumerable: true
+    });
+    next();
+});
+
+app.use(mongoSanitize()); // Prevent NoSQL injection attacks
 
 // General API Rate Limiter (Max 200 requests per 15 minutes per IP)
 const apiLimiter = rateLimit({
@@ -137,7 +145,7 @@ const TransactionSchema = new mongoose.Schema({
     amount: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
     status: { type: String, default: 'Pending' }, 
-    proofUrl: String, 
+    proofUrl: String, // Added to store screenshot state
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
@@ -163,6 +171,7 @@ const verifyAdminToken = (req, res, next) => {
     if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
 
     try {
+        // Token comes in format "Bearer <token>"
         const tokenParts = token.split(" ");
         const actualToken = tokenParts.length === 2 ? tokenParts[1] : tokenParts[0];
 
@@ -173,7 +182,7 @@ const verifyAdminToken = (req, res, next) => {
         }
         
         req.admin = verified;
-        next(); 
+        next(); // Proceed to the protected route
     } catch (err) {
         return res.status(401).json({ error: "Invalid or expired token." });
     }
@@ -182,7 +191,7 @@ const verifyAdminToken = (req, res, next) => {
 // 3. API ROUTES
 
 // --- ADMIN LOGIN ROUTE (GENERATES JWT) ---
-// Strict Rate Limiter for Admin Login
+// Strict Rate Limiter for Admin Login (Prevents Brute Force)
 const adminLoginLimiter = rateLimit({
     windowMs: 15 * 60 * 1000, 
     max: 10, 
@@ -191,9 +200,10 @@ const adminLoginLimiter = rateLimit({
 
 app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     const { password } = req.body;
-    const adminPass = process.env.ADMIN_PASS || 'admin@26wins'; 
+    const adminPass = process.env.ADMIN_PASS || 'admin@26wins'; // Set this securely in Render Environment
 
     if (password === adminPass) {
+        // Generate Token valid for 24 hours
         const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
         res.status(200).json({ message: "Auth successful", token: token });
     } else {
@@ -295,10 +305,10 @@ app.post('/api/megapay/webhook', async (req, res) => {
     }
 });
 
-
 // --- AUTHENTICATION ---
+// Rate limit registration to prevent spam accounts
 const authLimiter = rateLimit({
-    windowMs: 60 * 60 * 1000, 
+    windowMs: 60 * 60 * 1000, // 1 hour
     max: 15, 
     message: { error: "Too many accounts created from this IP, please try again later." }
 });
@@ -399,8 +409,6 @@ app.get('/api/user/:id/notifications', async (req, res) => {
         res.status(200).json(notifs);
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
-
-
 // --- MANUAL/CRYPTO DEPOSIT & WITHDRAWAL ---
 app.post('/api/wallet/deposit/manual', async (req, res) => {
     try {
@@ -700,7 +708,6 @@ app.get('/api/admin/bets', verifyAdminToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to fetch all bets." }); }
 });
 
-// Admin Route to Cancel and Refund Bet
 app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     try {
         const bet = await Bet.findById(req.params.id);
