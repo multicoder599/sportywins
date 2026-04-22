@@ -5,10 +5,26 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const bcrypt = require('bcrypt');
 const axios = require('axios');
+const jwt = require('jsonwebtoken'); // 🔒 New: For securing admin routes
+const helmet = require('helmet'); // 🔒 New: Secures HTTP headers
+const rateLimit = require('express-rate-limit'); // 🔒 New: Prevents brute-force
+const mongoSanitize = require('express-mongo-sanitize'); // 🔒 New: Prevents NoSQL Injection
 
 const app = express();
-app.use(express.json());
+
+// --- SECURITY MIDDLEWARE INITIALIZATION ---
+app.use(helmet()); // Set secure HTTP headers
 app.use(cors()); 
+app.use(express.json());
+app.use(mongoSanitize()); // Prevent NoSQL injection attacks
+
+// General API Rate Limiter (Max 200 requests per 15 minutes per IP)
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 200, 
+    message: { error: "Too many requests from this IP, please try again later." }
+});
+app.use('/api/', apiLimiter);
 
 // 1. Connect to MongoDB
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sportywins';
@@ -89,20 +105,21 @@ const BetSchema = new mongoose.Schema({
 const Bet = mongoose.model('Bet', BetSchema);
 
 const TransactionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Made optional for webhook flexibility
-    userPhone: String, // Added for webhook lookup
-    refId: String,     // Added for MegaPay receipt tracking
-    type: { type: String, required: true }, // Deposit, Withdrawal, Bet, Win, Refund
-    method: String,    // E.g., M-Pesa, Crypto
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    userPhone: String, 
+    refId: String,     
+    type: { type: String, required: true }, 
+    method: String,    
     amount: { type: Number, required: true },
     currency: { type: String, default: 'KES' },
-    status: { type: String, default: 'Pending' }, // Pending, Success, Failed, Completed
+    status: { type: String, default: 'Pending' }, 
+    proofUrl: String, // Added to store screenshot state
     date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
 const NotificationSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, // Null means global
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, 
     title: String,
     message: String,
     isRead: { type: Boolean, default: false },
@@ -111,13 +128,63 @@ const NotificationSchema = new mongoose.Schema({
 const Notification = mongoose.model('Notification', NotificationSchema);
 
 
+// ==========================================
+// 🔒 SECURITY: JWT AUTHENTICATION MIDDLEWARE
+// ==========================================
+const JWT_SECRET = process.env.JWT_SECRET || 'fallback_insecure_secret_do_not_use_in_prod';
+
+// Middleware to protect Admin routes
+const verifyAdminToken = (req, res, next) => {
+    const token = req.headers['authorization'];
+    if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
+
+    try {
+        // Token comes in format "Bearer <token>"
+        const tokenParts = token.split(" ");
+        const actualToken = tokenParts.length === 2 ? tokenParts[1] : tokenParts[0];
+
+        const verified = jwt.verify(actualToken, JWT_SECRET);
+        
+        if (verified.role !== 'admin') {
+            return res.status(403).json({ error: "Forbidden. Admin role required." });
+        }
+        
+        req.admin = verified;
+        next(); // Proceed to the protected route
+    } catch (err) {
+        return res.status(401).json({ error: "Invalid or expired token." });
+    }
+};
+
 // 3. API ROUTES
+
+// --- ADMIN LOGIN ROUTE (GENERATES JWT) ---
+// Strict Rate Limiter for Admin Login (Prevents Brute Force)
+const adminLoginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, 
+    max: 10, 
+    message: { error: "Too many login attempts. Please try again later." }
+});
+
+app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
+    const { password } = req.body;
+    const adminPass = process.env.ADMIN_PASS || 'admin123'; // Set this securely in Render Environment
+
+    if (password === adminPass) {
+        // Generate Token valid for 24 hours
+        const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
+        res.status(200).json({ message: "Auth successful", token: token });
+    } else {
+        res.status(401).json({ error: "Invalid credentials" });
+    }
+});
+
 
 // --- MEGAPAY INTEGRATION ---
 app.post('/api/deposit', async (req, res) => {
     try {
         const { userPhone, amount, method } = req.body;
-        if (amount < 10) return res.status(400).json({ success: false, message: 'Minimum deposit is 10 KES.' });
+        if (amount < 10) return res.status(400).json({ success: false, message: 'Minimum deposit is 10.' });
         const user = await User.findOne({ phone: userPhone });
         if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
 
@@ -208,11 +275,17 @@ app.post('/api/megapay/webhook', async (req, res) => {
 
 
 // --- AUTHENTICATION ---
-app.post('/api/auth/register', async (req, res) => {
+// Rate limit registration to prevent spam accounts
+const authLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 15, 
+    message: { error: "Too many accounts created from this IP, please try again later." }
+});
+
+app.post('/api/auth/register', authLimiter, async (req, res) => {
     try {
         const { username, email, phone, password } = req.body;
         
-        // Strict case-insensitive check for uniqueness
         const existingUsername = await User.findOne({ username: { $regex: new RegExp('^' + username + '$', 'i') } });
         if (existingUsername) return res.status(400).json({ error: "Username is already taken." });
 
@@ -259,7 +332,6 @@ app.post('/api/auth/login', async (req, res) => {
             phoneQuery = { $regex: new RegExp(digitsOnly.slice(-9) + '$') };
         }
 
-        // Case-insensitive lookup for username or email
         const user = await User.findOne({ 
             $or: [
                 { email: { $regex: new RegExp('^' + identifier + '$', 'i') } }, 
@@ -269,7 +341,6 @@ app.post('/api/auth/login', async (req, res) => {
             ] 
         });
 
-        // Exact error separation
         if (!user) return res.status(404).json({ error: "User not registered. Please check your details." });
 
         const isMatch = await bcrypt.compare(password, user.password);
@@ -316,7 +387,6 @@ app.post('/api/wallet/deposit/manual', async (req, res) => {
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         
-        // Add proof flag if it came from the screenshot modal
         const proofStatus = proofSubmitted ? 'Proof Submitted' : 'Pending';
 
         const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending', proofUrl: proofStatus });
@@ -426,13 +496,10 @@ app.get('/api/live-matches', async (req, res) => {
             };
         });
 
-        // MERGING ADMIN INJECTED MATCHES
         let dbMatches = [];
         try {
-            // Fetch any matches created via the Admin panel in the database
             const dbRes = await Match.find({}); 
             dbMatches = dbRes.map(dbMatch => {
-                // Ensure DB matches have the same format structure as API matches
                 return {
                     id: dbMatch._id.toString(),
                     sport: dbMatch.sport || 'football',
@@ -442,13 +509,13 @@ app.get('/api/live-matches', async (req, res) => {
                     home: dbMatch.home,
                     away: dbMatch.away,
                     isLive: dbMatch.isLive || false,
-                    isFeatured: true, // Give admin games high priority
+                    isFeatured: true,
                     time: dbMatch.time || '15:00',
                     date: dbMatch.date || new Date().toLocaleDateString(),
                     score: dbMatch.score || null,
                     odds: dbMatch.odds || [2.10, 3.10, 2.80],
                     marketCount: dbMatch.markets ? Object.keys(dbMatch.markets).length : 50,
-                    gradeScore: 1000, // Force admin games to the absolute top of the feed
+                    gradeScore: 1000, 
                     detailedMarkets: dbMatch.markets || {}
                 };
             });
@@ -456,10 +523,7 @@ app.get('/api/live-matches', async (req, res) => {
             console.error("Failed to merge DB matches:", e);
         }
 
-        // Combine DB Matches (Admin) with API Matches
         const combinedMatches = [...dbMatches, ...formattedMatches];
-
-        // Sort by Grade Score
         combinedMatches.sort((a, b) => b.gradeScore - a.gradeScore);
         
         res.status(200).json(combinedMatches.slice(0, 300)); 
@@ -493,7 +557,6 @@ app.post('/api/bets/place', async (req, res) => {
         user.balance -= stake; 
         await user.save();
 
-        // Initialize Legs with 'Open' status to be tracked by Auto-Settler
         const trackedLegs = legs.map(leg => ({
             ...leg,
             status: 'Open',
@@ -523,22 +586,19 @@ app.get('/api/bets/user/:userId', async (req, res) => {
 });
 
 
-// --- ADMIN ROUTES ---
-app.get('/api/matches', async (req, res) => {
-    try {
-        const matches = await Match.find();
-        res.status(200).json(matches);
-    } catch (err) { res.status(500).json({ error: "Could not fetch DB matches." }); }
-});
+// ==========================================
+// 🔒 ADMIN PROTECTED ROUTES 
+// All routes below require verifyAdminToken
+// ==========================================
 
-app.get('/api/admin/users', async (req, res) => {
+app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
     try {
         const users = await User.find().select('-password'); 
         res.status(200).json(users);
     } catch (err) { res.status(500).json({ error: "Failed to fetch users." }); }
 });
 
-app.put('/api/admin/users/:id/balance/set', async (req, res) => {
+app.put('/api/admin/users/:id/balance/set', verifyAdminToken, async (req, res) => {
     try {
         const { amount } = req.body;
         const user = await User.findById(req.params.id);
@@ -550,14 +610,14 @@ app.put('/api/admin/users/:id/balance/set', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to update balance." }); }
 });
 
-app.delete('/api/admin/users/:id', async (req, res) => {
+app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
     try {
         await User.findByIdAndDelete(req.params.id);
         res.status(200).json({ message: "User deleted." });
     } catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
 });
 
-app.get('/api/admin/transactions', async (req, res) => {
+app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
     try {
         const statusFilter = req.query.status || 'Pending';
         const txns = await Transaction.find({ status: statusFilter })
@@ -567,7 +627,7 @@ app.get('/api/admin/transactions', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to fetch transactions." }); }
 });
 
-app.put('/api/admin/transactions/:id/:action', async (req, res) => {
+app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res) => {
     try {
         const action = req.params.action.toLowerCase();
         const txn = await Transaction.findById(req.params.id);
@@ -597,7 +657,7 @@ app.put('/api/admin/transactions/:id/:action', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
-app.post('/api/admin/matches', async (req, res) => {
+app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const newMatch = new Match(req.body);
         await newMatch.save();
@@ -605,14 +665,14 @@ app.post('/api/admin/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to add match." }); }
 });
 
-app.delete('/api/admin/matches/:id', async (req, res) => {
+app.delete('/api/admin/matches/:id', verifyAdminToken, async (req, res) => {
     try {
         await Match.findByIdAndDelete(req.params.id);
         res.status(200).json({ message: "Match deleted." });
     } catch (err) { res.status(500).json({ error: "Failed to delete match." }); }
 });
 
-app.get('/api/admin/bets', async (req, res) => {
+app.get('/api/admin/bets', verifyAdminToken, async (req, res) => {
     try {
         const bets = await Bet.find().populate('userId', 'username phone').sort({ date: -1 });
         res.status(200).json(bets);
@@ -620,7 +680,7 @@ app.get('/api/admin/bets', async (req, res) => {
 });
 
 // Admin Route to Cancel and Refund Bet
-app.put('/api/admin/bets/:id/cancel', async (req, res) => {
+app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     try {
         const bet = await Bet.findById(req.params.id);
         if (!bet) return res.status(404).json({ error: "Bet not found." });
@@ -631,7 +691,7 @@ app.put('/api/admin/bets/:id/cancel', async (req, res) => {
 
         const user = await User.findById(bet.userId);
         if (user) {
-            user.balance += bet.stake; // Refund stake
+            user.balance += bet.stake; 
             await user.save();
 
             await Transaction.create({
@@ -656,7 +716,7 @@ app.put('/api/admin/bets/:id/cancel', async (req, res) => {
 });
 
 
-app.put('/api/admin/matches/:id/result', async (req, res) => {
+app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
     try {
         const { score, isLive } = req.body;
         const match = await Match.findByIdAndUpdate(
@@ -685,24 +745,20 @@ setInterval(async () => {
             for (let leg of bet.legs) {
                 if (!leg.status || leg.status === 'Open') {
                     
-                    // Parse Match End Time
                     let matchEnd = new Date(bet.date); 
                     if (leg.time && leg.time.includes('•')) {
                         const [dPart, tPart] = leg.time.split(' • ');
                         const parsedDate = new Date(`${dPart} ${tPart}`);
                         if (!isNaN(parsedDate)) {
-                            // Standard Football Duration + Halftime (110 mins)
                             matchEnd = new Date(parsedDate.getTime() + (110 * 60000));
                         }
                     } else if (leg.time === 'Upcoming') {
                         matchEnd = new Date(bet.date.getTime() + (110 * 60000));
                     }
 
-                    // Grade it if Match is Over
                     if (now >= matchEnd) {
                         let finalScore = null;
                         
-                        // CHECK ADMIN INJECTION: Check if Admin set a score in DB
                         let dbMatch = null;
                         try {
                             if (mongoose.Types.ObjectId.isValid(leg.id)) {
@@ -714,7 +770,6 @@ setInterval(async () => {
                             }
                         } catch(e) {}
 
-                        // If Admin set a score, use it! Otherwise, simulate a fallback score.
                         if (dbMatch && dbMatch.score) {
                             finalScore = dbMatch.score;
                         } else {
@@ -725,7 +780,6 @@ setInterval(async () => {
 
                         leg.score = finalScore;
                         
-                        // Parse score for grading
                         const [hStr, aStr] = finalScore.split('-');
                         const hG = parseInt(hStr) || 0;
                         const aG = parseInt(aStr) || 0;
@@ -733,29 +787,26 @@ setInterval(async () => {
                         let isWin = false;
                         let pick = leg.pick || leg.selection;
 
-                        // Mock Grading Engine
                         if (leg.selection === '1' && hG > aG) isWin = true;
                         else if (leg.selection === 'X' && hG === aG) isWin = true;
                         else if (leg.selection === '2' && aG > hG) isWin = true;
                         else if (pick.includes('Over') && (hG + aG) > 2.5) isWin = true;
                         else if (pick.includes('Under') && (hG + aG) < 2.5) isWin = true;
-                        else if (pick.includes('Yes') && hG > 0 && aG > 0) isWin = true; // BTTS Yes
-                        else if (pick.includes('No') && (hG === 0 || aG === 0)) isWin = true; // BTTS No
-                        else if (Math.random() > 0.5) isWin = true; // Fallback 50/50 for complex props
+                        else if (pick.includes('Yes') && hG > 0 && aG > 0) isWin = true; 
+                        else if (pick.includes('No') && (hG === 0 || aG === 0)) isWin = true; 
+                        else if (Math.random() > 0.5) isWin = true; 
 
                         leg.status = isWin ? 'Won' : 'Lost';
                         betUpdated = true;
                     } else {
-                        allSettled = false; // Match still playing
+                        allSettled = false; 
                     }
                 }
 
-                // Check Leg Statuses
                 if (leg.status === 'Lost') isBetLost = true;
                 else if (leg.status === 'Open' || !leg.status) allSettled = false;
             }
 
-            // Master Ticket Settlement
             if (isBetLost) {
                 bet.status = 'Lost';
                 betUpdated = true;
@@ -763,7 +814,6 @@ setInterval(async () => {
                 bet.status = 'Won';
                 betUpdated = true;
 
-                // Pay the User!
                 const user = await User.findById(bet.userId);
                 if (user) {
                     user.balance += bet.potentialReturn;
@@ -787,7 +837,6 @@ setInterval(async () => {
                 }
             }
 
-            // Save updates back to DB (markModified is critical for Mongoose mixed arrays)
             if (betUpdated) {
                 bet.markModified('legs');
                 await bet.save();
@@ -796,7 +845,7 @@ setInterval(async () => {
     } catch (err) {
         console.error("Auto-Settlement Engine Error:", err);
     }
-}, 60000); // Scans every 60 Seconds
+}, 60000); 
 
 
 // 4. Start Server
