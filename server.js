@@ -26,22 +26,18 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
+const allowedOrigins = [
+    'https://sportywins.onrender.com', 
+    'https://winsadmin.surge.sh',      
+    'http://localhost:3000',           
+    'http://127.0.0.1:5500'            
+];
+
 // 🔒 UNIVERSAL CORS POLICY (Unblocks Mobile App & All Domains)
 app.use(cors({
     origin: function (origin, callback) {
         // This allows absolutely any domain, app, or local file to connect
         callback(null, true); 
-    },
-    credentials: true
-}));
-
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-        if (allowedOrigins.indexOf(origin) === -1) {
-            return callback(new Error('The CORS policy for this site does not allow access from the specified Origin.'), false);
-        }
-        return callback(null, true);
     },
     credentials: true
 }));
