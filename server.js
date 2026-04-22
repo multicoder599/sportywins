@@ -168,7 +168,7 @@ const adminLoginLimiter = rateLimit({
 
 app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
     const { password } = req.body;
-    const adminPass = process.env.ADMIN_PASS || 'admin123'; // Set this securely in Render Environment
+    const adminPass = process.env.ADMIN_PASS || 'admin@26wins'; // Set this securely in Render Environment
 
     if (password === adminPass) {
         // Generate Token valid for 24 hours
