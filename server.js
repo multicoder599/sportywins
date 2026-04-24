@@ -49,42 +49,6 @@ const apiLimiter = rateLimit({
 });
 app.use('/api/', apiLimiter);
 
-// 🔒 CORS SAFETY STRATEGY: Allow all origins for PWA/mobile compatibility,
-// but monitor, log, and restrict sensitive operations.
-const knownOrigins = [
-    'https://sportywins.onrender.com',
-    'https://winsadmin.surge.sh',
-    'http://localhost:3000',
-    'http://127.0.0.1:5500'
-];
-
-app.use((req, res, next) => {
-    const origin = req.headers.origin || req.headers.referer || 'direct/no-origin';
-    const isKnown = knownOrigins.some(ko => origin.includes(ko));
-    const isSensitive = ['POST', 'PUT', 'DELETE', 'PATCH'].includes(req.method);
-    const isPublic = req.path.includes('/auth/') || req.path.includes('/matches') || req.path.includes('/live-matches') || req.path.includes('/search') || req.path === '/';
-    const isWebhook = req.path.includes('/webhook');
-
-    // 1. Log suspicious write requests from unknown origins
-    if (isSensitive && !isPublic && !isWebhook && !isKnown) {
-        const warning = `🚨 SUSPICIOUS REQUEST\nOrigin: ${origin}\nMethod: ${req.method}\nPath: ${req.path}\nIP: ${req.ip}\nUA: ${req.headers['user-agent'] || 'none'}`;
-        console.warn("⚠️ " + warning);
-        sendTelegramMessage(warning.replace(/\n/g, '\n'));
-    }
-
-    // 2. Block sensitive wallet/bet mutations without origin header entirely (bots/scripts)
-    if (isSensitive && !isPublic && !isWebhook && origin === 'direct/no-origin') {
-        return res.status(403).json({ error: "Forbidden. Origin header required." });
-    }
-
-    // 3. Add security headers to all responses
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-
-    next();
-});
-
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sportywins';
 mongoose.connect(MONGO_URI)
   .then(() => console.log('✅ MongoDB Connected Successfully'))
@@ -257,11 +221,6 @@ const Notification = mongoose.model('Notification', NotificationSchema);
 const JWT_SECRET = process.env.JWT_SECRET || 'fallback_insecure_secret_do_not_use_in_prod';
 
 const verifyAdminToken = (req, res, next) => {
-    const apiKey = req.headers['x-api-key'];
-    const expectedKey = process.env.ADMIN_API_KEY || 'sw_admin_fallback_key';
-    if (apiKey !== expectedKey) {
-        return res.status(403).json({ error: "Forbidden. Invalid API key." });
-    }
     const token = req.headers['authorization'];
     if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
     try {
@@ -327,15 +286,7 @@ app.post('/api/deposit', async (req, res) => {
     } catch (error) { res.status(500).json({ success: false, message: "Payment Gateway Error." }); }
 });
 
-app.post('/api/megapay/webhook', (req, res, next) => {
-    const token = req.headers['x-webhook-secret'] || req.query.secret;
-    const expected = process.env.WEBHOOK_SECRET || 'sportywins_webhook_fallback';
-    if (token !== expected) {
-        console.warn(`❌ Webhook rejected from IP ${req.ip} — invalid secret`);
-        return res.status(401).send("Unauthorized");
-    }
-    next();
-}, async (req, res) => {
+app.post('/api/megapay/webhook', async (req, res) => {
     res.status(200).send("OK");
     const data = req.body;
     try {
