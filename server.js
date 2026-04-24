@@ -38,7 +38,11 @@ const allowedOrigins = [
 // 🔒 UNIVERSAL CORS POLICY
 app.use(cors({
     origin: function (origin, callback) {
-        callback(null, true);
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error("Not allowed by CORS"));
+        }
     },
     credentials: true
 }));
@@ -160,6 +164,7 @@ const BetSchema = new mongoose.Schema({
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
     userTimezone: { type: String, default: 'Africa/Nairobi' }, // NEW: Snapshot at bet time
+    bookingCode: { type: String, unique: true, sparse: true }, // NEW: Shareable code
     legs: [{
         matchId: String,
         match: String,
@@ -174,6 +179,25 @@ const BetSchema = new mongoose.Schema({
     }]
 });
 const Bet = mongoose.model('Bet', BetSchema);
+
+const BookingSlipSchema = new mongoose.Schema({
+    code: { type: String, required: true, unique: true, index: true },
+    legs: [{
+        matchId: String,
+        match: String,
+        pick: String,
+        selection: String,
+        marketType: { type: String, default: '1x2' },
+        odds: Number,
+        startTime: Date
+    }],
+    stake: Number,
+    totalOdds: Number,
+    potentialReturn: Number,
+    currency: String,
+    createdAt: { type: Date, default: Date.now, expires: 86400 }
+});
+const BookingSlip = mongoose.model('BookingSlip', BookingSlipSchema);
 
 const TransactionSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
@@ -578,7 +602,7 @@ app.get('/api/search', async (req, res) => {
 
 app.post('/api/bets/place', async (req, res) => {
     try {
-        const { userId, stake, totalOdds, potentialReturn, currency, legs } = req.body;
+        const { userId, stake, totalOdds, potentialReturn, currency, legs, bookingCode } = req.body;
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         if (user.balance < stake) return res.status(400).json({ error: "Insufficient balance." });
@@ -614,6 +638,7 @@ app.post('/api/bets/place', async (req, res) => {
         const newBet = new Bet({
             userId: user._id,
             ticketId: "SW-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
+            bookingCode: bookingCode || undefined,
             stake,
             totalOdds,
             potentialReturn,
@@ -638,6 +663,36 @@ app.get('/api/bets/user/:userId', async (req, res) => {
         const bets = await Bet.find({ userId: req.params.userId }).sort({ date: -1 });
         res.status(200).json(bets);
     } catch (err) { res.status(500).json({ error: "Failed to fetch bets." }); }
+});
+
+// Save a shareable booking code (betslip template)
+app.post('/api/bets/save-code', async (req, res) => {
+    try {
+        const { code, legs, stake, totalOdds, potentialReturn, currency } = req.body;
+        if (!code || !legs || legs.length === 0) {
+            return res.status(400).json({ error: "Code and legs are required." });
+        }
+        await BookingSlip.findOneAndUpdate(
+            { code: code.toUpperCase() },
+            { code: code.toUpperCase(), legs, stake, totalOdds, potentialReturn, currency },
+            { upsert: true, new: true }
+        );
+        res.status(200).json({ success: true, message: "Code saved." });
+    } catch (err) {
+        console.error("Save code error:", err);
+        res.status(500).json({ error: "Failed to save code." });
+    }
+});
+
+// Load a shareable booking code
+app.get('/api/bets/code/:code', async (req, res) => {
+    try {
+        const slip = await BookingSlip.findOne({ code: req.params.code.toUpperCase() });
+        if (!slip) return res.status(404).json({ error: "Code not found or expired." });
+        res.status(200).json(slip);
+    } catch (err) {
+        res.status(500).json({ error: "Failed to load code." });
+    }
 });
 
 // ==========================================
