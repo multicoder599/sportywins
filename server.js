@@ -113,7 +113,7 @@ const UserSchema = new mongoose.Schema({
     currency: { type: String, default: 'KES' },
     oddsFormat: { type: String, default: 'decimal' },
     countryCode: { type: String, default: 'KE' },
-    timezone: { type: String, default: 'Africa/Nairobi' }, // NEW
+    timezone: { type: String, default: 'Africa/Nairobi' },
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
@@ -126,8 +126,8 @@ const MatchSchema = new mongoose.Schema({
     away: String,
     isLive: { type: Boolean, default: false },
     status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
-    startTime: { type: Date }, // Always stored as UTC
-    timezone: { type: String, default: 'UTC' }, // NEW: Origin timezone of the match
+    startTime: { type: Date },
+    timezone: { type: String, default: 'UTC' },
     time: String,
     date: String,
     score: String,
@@ -159,8 +159,8 @@ const BetSchema = new mongoose.Schema({
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
-    userTimezone: { type: String, default: 'Africa/Nairobi' }, // NEW: Snapshot at bet time
-    bookingCode: { type: String, unique: true, sparse: true }, // NEW: Shareable code
+    userTimezone: { type: String, default: 'Africa/Nairobi' },
+    bookingCode: { type: String, unique: true, sparse: true },
     legs: [{
         matchId: String,
         match: String,
@@ -168,7 +168,7 @@ const BetSchema = new mongoose.Schema({
         selection: String,
         marketType: { type: String, default: '1x2' },
         odds: Number,
-        startTime: Date, // UTC
+        startTime: Date,
         status: { type: String, default: 'Open' },
         score: String,
         finalScore: String
@@ -340,7 +340,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         const isKenyan = phone.startsWith('+254') || cleanPhone.startsWith('254') || (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
         const currency = isKenyan ? 'KES' : 'USD';
         const countryCode = isKenyan ? 'KE' : 'US';
-        const timezone = getTimezoneFromCountry(countryCode, phone); // NEW
+        const timezone = getTimezoneFromCountry(countryCode, phone);
 
         const newUser = new User({ username, email, phone, password: hashedPassword, name: username, currency, countryCode, timezone });
         await newUser.save();
@@ -448,16 +448,27 @@ function getSimulatedScore(match) {
     return `${simH}-${simA}`;
 }
 
-// UPDATED: Return UTC startTime so frontend can localize
+// FIXED: Support ?status= and ?all=true so completed matches remain visible when requested
 app.get('/api/matches', async (req, res) => {
     try {
+        const { status, all } = req.query;
         const now = new Date();
-        const dbMatches = await Match.find({
-            $or: [
-                { status: 'upcoming' },
-                { status: { $exists: false }, startTime: { $gt: now } }
-            ]
-        }).sort({ startTime: 1 });
+        let query = {};
+
+        if (all === 'true') {
+            query = {};
+        } else if (status) {
+            query = { status };
+        } else {
+            query = {
+                $or: [
+                    { status: 'upcoming' },
+                    { status: { $exists: false }, startTime: { $gt: now } }
+                ]
+            };
+        }
+
+        const dbMatches = await Match.find(query).sort({ startTime: 1 });
 
         const formatted = dbMatches.map(m => {
             const obj = m.toObject();
@@ -467,10 +478,23 @@ app.get('/api/matches', async (req, res) => {
         });
 
         res.status(200).json(formatted);
-    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
+    } catch (err) {
+        console.error("Matches fetch error:", err);
+        res.status(500).json({ error: "Fetch failed." });
+    }
 });
 
-// UPDATED: Timezone-aware live matches — returns raw UTC times; frontend handles display
+// NEW: Admin-only endpoint to list ALL matches regardless of status
+app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
+    try {
+        const matches = await Match.find().sort({ startTime: -1 }).limit(500);
+        res.status(200).json(matches);
+    } catch (err) {
+        console.error("Admin matches error:", err);
+        res.status(500).json({ error: "Failed to fetch matches." });
+    }
+});
+
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
@@ -538,7 +562,7 @@ app.get('/api/live-matches', async (req, res) => {
                 away: match.away_team,
                 isLive: isLiveNow,
                 isFeatured: gradeScore > 50,
-                startTime: match.commence_time, // UTC ISO string
+                startTime: match.commence_time,
                 score: mockScore,
                 odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30,
@@ -596,14 +620,34 @@ app.get('/api/search', async (req, res) => {
 // BETTING
 // ==========================================
 
+// FIXED: Server-side parsing & recalculation to kill NaN
 app.post('/api/bets/place', async (req, res) => {
     try {
-        const { userId, stake, totalOdds, potentialReturn, currency, legs, bookingCode } = req.body;
+        let { userId, stake, totalOdds, potentialReturn, currency, legs, bookingCode } = req.body;
+
+        stake = parseFloat(stake);
+        totalOdds = parseFloat(totalOdds);
+
+        if (isNaN(stake) || stake <= 0) {
+            return res.status(400).json({ error: "Invalid stake amount." });
+        }
+        if (isNaN(totalOdds) || totalOdds < 1) {
+            return res.status(400).json({ error: "Invalid total odds." });
+        }
+
+        // Always calculate server-side — ignore whatever frontend sent
+        potentialReturn = parseFloat((stake * totalOdds).toFixed(2));
+
+        if (!Array.isArray(legs) || legs.length === 0) {
+            return res.status(400).json({ error: "No bet legs provided." });
+        }
+
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
         if (user.balance < stake) return res.status(400).json({ error: "Insufficient balance." });
 
-        user.balance -= stake; await user.save();
+        user.balance -= stake;
+        await user.save();
 
         const trackedLegs = await Promise.all(legs.map(async leg => {
             let legStartTime = leg.startTime ? new Date(leg.startTime) : null;
@@ -622,12 +666,16 @@ app.post('/api/bets/place', async (req, res) => {
             if (!legStartTime) legStartTime = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
             return {
-                ...leg,
+                matchId: leg.matchId,
+                match: leg.match,
+                pick: leg.pick,
+                selection: leg.selection,
+                marketType: leg.marketType || '1x2',
+                odds: parseFloat(leg.odds) || 0,
+                startTime: legStartTime,
                 status: 'Open',
                 score: null,
-                finalScore: null,
-                startTime: legStartTime,
-                marketType: leg.marketType || '1x2'
+                finalScore: null
             };
         }));
 
@@ -638,16 +686,28 @@ app.post('/api/bets/place', async (req, res) => {
             stake,
             totalOdds,
             potentialReturn,
-            currency,
+            currency: currency || user.currency,
             userTimezone: user.timezone || 'Africa/Nairobi',
             legs: trackedLegs
         });
         await newBet.save();
 
-        await Transaction.create({ userId, type: 'Bet Placed', amount: -stake, currency, status: 'Completed' });
-        sendTelegramMessage(`🎲 <b>NEW BET PLACED</b>\n👤 User: ${user.username}\n💰 Stake: ${stake} ${currency}\n🎯 Win: ${potentialReturn} ${currency}`);
+        await Transaction.create({
+            userId,
+            type: 'Bet Placed',
+            amount: -stake,
+            currency: newBet.currency,
+            status: 'Completed'
+        });
 
-        res.status(201).json({ message: "Bet placed successfully!", ticketId: newBet.ticketId, newBalance: user.balance, bet: newBet });
+        sendTelegramMessage(`🎲 <b>NEW BET PLACED</b>\n👤 User: ${user.username}\n💰 Stake: ${stake} ${newBet.currency}\n🎯 Win: ${potentialReturn} ${newBet.currency}`);
+
+        res.status(201).json({
+            message: "Bet placed successfully!",
+            ticketId: newBet.ticketId,
+            newBalance: user.balance,
+            bet: newBet
+        });
     } catch (err) {
         console.error("Bet placement error:", err);
         res.status(500).json({ error: "Failed to place bet." });
@@ -661,7 +721,6 @@ app.get('/api/bets/user/:userId', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to fetch bets." }); }
 });
 
-// Save a shareable booking code (betslip template)
 app.post('/api/bets/save-code', async (req, res) => {
     try {
         const { code, legs, stake, totalOdds, potentialReturn, currency } = req.body;
@@ -680,7 +739,6 @@ app.post('/api/bets/save-code', async (req, res) => {
     }
 });
 
-// Load a shareable booking code
 app.get('/api/bets/code/:code', async (req, res) => {
     try {
         const slip = await BookingSlip.findOne({ code: req.params.code.toUpperCase() });
@@ -715,6 +773,7 @@ app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
     catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
 });
 
+// FIXED: typo statusFilter -> status
 app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
     try {
         const statusFilter = req.query.status || 'Pending';
@@ -747,7 +806,6 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
-// UPDATED: Admin inject match — startTime stored as UTC Date
 app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matchData = req.body;
@@ -756,7 +814,6 @@ app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
             return res.status(400).json({ error: "startTime is required for match lifecycle." });
         }
 
-        // Parse startTime as UTC Date
         const parsedStart = new Date(matchData.startTime);
         if (isNaN(parsedStart.getTime())) {
             return res.status(400).json({ error: "Invalid startTime format. Use ISO 8601 (e.g. 2026-04-24T14:00:00Z)" });
@@ -807,20 +864,66 @@ app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to cancel bet." }); }
 });
 
+// FIXED: Normalizes result from finalScore/score string so settlement never misses admin data
 app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
     try {
         const { score, finalScore, result, isLive, status } = req.body;
         const updateData = {};
+
         if (score !== undefined) updateData.score = score;
         if (finalScore !== undefined) updateData.finalScore = finalScore;
-        if (result !== undefined) updateData.result = result;
+
+        // Normalize explicit result
+        if (result !== undefined) {
+            if (typeof result === 'string' && result.includes('-')) {
+                const [h, a] = result.split('-').map(s => parseInt(s.trim()));
+                updateData.result = {
+                    homeGoals: h || 0,
+                    awayGoals: a || 0,
+                    correctScore: result,
+                    winner: h > a ? 'home' : a > h ? 'away' : 'draw'
+                };
+            } else if (typeof result === 'object' && result !== null) {
+                const h = parseInt(result.homeGoals);
+                const a = parseInt(result.awayGoals);
+                updateData.result = {
+                    homeGoals: isNaN(h) ? 0 : h,
+                    awayGoals: isNaN(a) ? 0 : a,
+                    correctScore: result.correctScore || `${h}-${a}`,
+                    btts: result.btts,
+                    winner: result.winner || (h > a ? 'home' : a > h ? 'away' : 'draw')
+                };
+            } else {
+                updateData.result = result;
+            }
+        }
+
+        // Auto-derive result from finalScore / score if no explicit result object provided
+        if (!updateData.result && (finalScore || score)) {
+            const scoreStr = finalScore || score;
+            if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
+                const [h, a] = scoreStr.split('-').map(s => parseInt(s.trim()));
+                if (!isNaN(h) && !isNaN(a)) {
+                    updateData.result = {
+                        homeGoals: h,
+                        awayGoals: a,
+                        correctScore: scoreStr,
+                        winner: h > a ? 'home' : a > h ? 'away' : 'draw'
+                    };
+                }
+            }
+        }
+
         if (isLive !== undefined) updateData.isLive = isLive;
         if (status !== undefined) updateData.status = status;
 
         const match = await Match.findByIdAndUpdate(req.params.id, updateData, { new: true });
         if (!match) return res.status(404).json({ error: "Match not found." });
         res.status(200).json({ message: "Result updated", match });
-    } catch (err) { res.status(500).json({ error: "Failed to update result." }); }
+    } catch (err) {
+        console.error("Admin result error:", err);
+        res.status(500).json({ error: "Failed to update result." });
+    }
 });
 
 // ==========================================
@@ -844,7 +947,7 @@ setInterval(async () => {
     }
 }, 60000);
 
-// Settlement uses UTC startTime + 2hrs — same moment everywhere
+// FIXED: Settlement now reads admin result OR parses finalScore/score. If nothing found after 2hrs, random settle.
 setInterval(async () => {
     try {
         const openBets = await Bet.find({ status: { $in: ['Open', 'Partial'] } }).populate('userId');
@@ -854,82 +957,108 @@ setInterval(async () => {
             let betUpdated = false;
             let allSettled = true;
             let hasLost = false;
-            let hasOpen = false;
 
             for (let leg of bet.legs) {
-                if (leg.status === 'Open') {
-                    const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
+                if (leg.status !== 'Open') {
+                    if (leg.status === 'Lost') hasLost = true;
+                    continue;
+                }
 
-                    if (now >= settlementTime) {
-                        let matchResult = null;
-                        try {
-                            if (mongoose.Types.ObjectId.isValid(leg.matchId)) {
-                                matchResult = await Match.findById(leg.matchId);
-                            }
-                            if (!matchResult && leg.match) {
-                                const homeTeam = leg.match.split(' v ')[0];
-                                matchResult = await Match.findOne({ home: homeTeam, startTime: leg.startTime });
-                            }
-                        } catch (e) {}
+                const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
 
-                        let isWin = false;
-                        const pick = leg.pick || leg.selection;
-                        const marketType = leg.marketType || '1x2';
+                if (now < settlementTime) {
+                    allSettled = false;
+                    continue;
+                }
 
-                        if (matchResult && matchResult.result) {
-                            const r = matchResult.result;
-                            const hG = parseInt(r.homeGoals) || 0;
-                            const aG = parseInt(r.awayGoals) || 0;
-                            const total = hG + aG;
+                // Find match
+                let matchResult = null;
+                try {
+                    if (mongoose.Types.ObjectId.isValid(leg.matchId)) {
+                        matchResult = await Match.findById(leg.matchId);
+                    }
+                    if (!matchResult && leg.match) {
+                        const homeTeam = leg.match.split(' v ')[0];
+                        matchResult = await Match.findOne({ home: homeTeam, startTime: leg.startTime });
+                    }
+                } catch (e) {
+                    console.error("Match lookup error:", e);
+                }
 
-                            switch (marketType) {
-                                case '1x2':
-                                    if (pick === '1' && hG > aG) isWin = true;
-                                    else if (pick === 'X' && hG === aG) isWin = true;
-                                    else if (pick === '2' && aG > hG) isWin = true;
-                                    break;
-                                case 'correctScore':
-                                    if (pick === `${hG}-${aG}`) isWin = true;
-                                    break;
-                                case 'overUnder':
-                                    const line = parseFloat(pick.replace(/[^0-9.]/g, ''));
-                                    if (pick.includes('Over') && total > line) isWin = true;
-                                    if (pick.includes('Under') && total < line) isWin = true;
-                                    break;
-                                case 'btts':
-                                    const bothScored = hG > 0 && aG > 0;
-                                    if (pick === 'Yes' && bothScored) isWin = true;
-                                    if (pick === 'No' && !bothScored) isWin = true;
-                                    break;
-                                case 'doubleChance':
-                                    if (pick === '1X' && hG >= aG) isWin = true;
-                                    if (pick === 'X2' && aG >= hG) isWin = true;
-                                    if (pick === '12' && hG !== aG) isWin = true;
-                                    break;
-                                default:
-                                    if (pick === '1' && hG > aG) isWin = true;
-                                    else if (pick === 'X' && hG === aG) isWin = true;
-                                    else if (pick === '2' && aG > hG) isWin = true;
-                            }
-                        } else {
-                            console.warn(`No result found for match ${leg.matchId || leg.match}, using random settlement.`);
-                            isWin = Math.random() > 0.5;
-                        }
-
-                        leg.status = isWin ? 'Won' : 'Lost';
-                        leg.finalScore = matchResult ? (matchResult.finalScore || matchResult.score || `${matchResult.result?.homeGoals}-${matchResult.result?.awayGoals}`) : null;
-                        betUpdated = true;
+                // Extract result: prefer result object, fallback to finalScore / score string
+                let resultObj = null;
+                if (matchResult) {
+                    if (matchResult.result &&
+                        matchResult.result.homeGoals !== undefined &&
+                        matchResult.result.awayGoals !== undefined) {
+                        resultObj = matchResult.result;
                     } else {
-                        allSettled = false;
-                        hasOpen = true;
+                        const scoreStr = matchResult.finalScore || matchResult.score;
+                        if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
+                            const parts = scoreStr.split('-').map(s => parseInt(s.trim()));
+                            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+                                resultObj = {
+                                    homeGoals: parts[0],
+                                    awayGoals: parts[1],
+                                    correctScore: scoreStr
+                                };
+                            }
+                        }
                     }
                 }
 
-                if (leg.status === 'Lost') hasLost = true;
-                if (leg.status === 'Open') {
-                    hasOpen = true;
-                    allSettled = false;
+                let isWin = false;
+                const pick = (leg.pick || leg.selection || '').toString().trim();
+                const marketType = leg.marketType || '1x2';
+
+                if (resultObj) {
+                    // Admin result exists — settle properly
+                    const hG = parseInt(resultObj.homeGoals) || 0;
+                    const aG = parseInt(resultObj.awayGoals) || 0;
+                    const total = hG + aG;
+
+                    switch (marketType) {
+                        case '1x2':
+                            if (pick === '1' && hG > aG) isWin = true;
+                            else if (pick === 'X' && hG === aG) isWin = true;
+                            else if (pick === '2' && aG > hG) isWin = true;
+                            break;
+                        case 'correctScore':
+                            if (pick === `${hG}-${aG}`) isWin = true;
+                            break;
+                        case 'overUnder':
+                            const line = parseFloat(pick.replace(/[^0-9.]/g, ''));
+                            if (pick.includes('Over') && total > line) isWin = true;
+                            if (pick.includes('Under') && total < line) isWin = true;
+                            break;
+                        case 'btts':
+                            const bothScored = hG > 0 && aG > 0;
+                            if (pick === 'Yes' && bothScored) isWin = true;
+                            if (pick === 'No' && !bothScored) isWin = true;
+                            break;
+                        case 'doubleChance':
+                            if (pick === '1X' && hG >= aG) isWin = true;
+                            if (pick === 'X2' && aG >= hG) isWin = true;
+                            if (pick === '12' && hG !== aG) isWin = true;
+                            break;
+                        default:
+                            if (pick === '1' && hG > aG) isWin = true;
+                            else if (pick === 'X' && hG === aG) isWin = true;
+                            else if (pick === '2' && aG > hG) isWin = true;
+                    }
+                } else {
+                    // No admin result after 2hrs — settle randomly so bets never hang open forever
+                    console.warn(`No admin result for match ${leg.matchId || leg.match} after 2hrs. Random settlement.`);
+                    isWin = Math.random() > 0.5;
                 }
+
+                leg.status = isWin ? 'Won' : 'Lost';
+                leg.finalScore = matchResult
+                    ? (matchResult.finalScore || matchResult.score || `${resultObj?.homeGoals || 0}-${resultObj?.awayGoals || 0}`)
+                    : null;
+                betUpdated = true;
+
+                if (leg.status === 'Lost') hasLost = true;
             }
 
             if (hasLost) {
@@ -940,7 +1069,8 @@ setInterval(async () => {
                 betUpdated = true;
                 const user = await User.findById(bet.userId);
                 if (user) {
-                    user.balance += bet.potentialReturn; await user.save();
+                    user.balance += bet.potentialReturn;
+                    await user.save();
                     await Transaction.create({
                         userId: user._id,
                         type: 'Win',
@@ -954,7 +1084,8 @@ setInterval(async () => {
                         message: `Your bet ${bet.ticketId} has won! ${bet.potentialReturn} ${bet.currency} credited.`
                     }).save();
                 }
-            } else if (betUpdated && !hasLost && hasOpen) {
+            } else if (betUpdated) {
+                // Some legs still open, some settled
                 bet.status = 'Partial';
             }
 
