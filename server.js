@@ -74,7 +74,33 @@ const getCryptoAddresses = () => ({
 });
 
 // ==========================================
-// UPDATED SCHEMAS
+// TIMEZONE HELPERS
+// ==========================================
+
+const getTimezoneFromCountry = (countryCode, phone = '') => {
+    const map = {
+        KE: 'Africa/Nairobi', UG: 'Africa/Kampala', TZ: 'Africa/Dar_es_Salaam',
+        NG: 'Africa/Lagos', ZA: 'Africa/Johannesburg', GH: 'Africa/Accra',
+        GB: 'Europe/London', US: 'America/New_York', CA: 'America/Toronto',
+        AU: 'Australia/Sydney', IN: 'Asia/Kolkata', DE: 'Europe/Berlin',
+        FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
+        BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
+    };
+    // Phone prefix fallback
+    const p = String(phone).replace(/\D/g, '');
+    if (p.startsWith('254')) return 'Africa/Nairobi';
+    if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
+    if (p.startsWith('256')) return 'Africa/Kampala';
+    if (p.startsWith('234')) return 'Africa/Lagos';
+    if (p.startsWith('27'))  return 'Africa/Johannesburg';
+    if (p.startsWith('233')) return 'Africa/Accra';
+    if (p.startsWith('44'))  return 'Europe/London';
+    if (p.startsWith('1'))   return 'America/New_York';
+    return map[countryCode] || 'UTC';
+};
+
+// ==========================================
+// SCHEMAS
 // ==========================================
 
 const UserSchema = new mongoose.Schema({
@@ -87,11 +113,11 @@ const UserSchema = new mongoose.Schema({
     currency: { type: String, default: 'KES' },
     oddsFormat: { type: String, default: 'decimal' },
     countryCode: { type: String, default: 'KE' },
+    timezone: { type: String, default: 'Africa/Nairobi' }, // NEW
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
 
-// NEW: Expanded Match schema with lifecycle, markets, and result storage
 const MatchSchema = new mongoose.Schema({
     sport: String,
     league: String,
@@ -100,11 +126,12 @@ const MatchSchema = new mongoose.Schema({
     away: String,
     isLive: { type: Boolean, default: false },
     status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
-    startTime: { type: Date }, // NEW: Required for injected games
+    startTime: { type: Date }, // Always stored as UTC
+    timezone: { type: String, default: 'UTC' }, // NEW: Origin timezone of the match
     time: String,
     date: String,
     score: String,
-    finalScore: String, // NEW: Final result after completion
+    finalScore: String,
     odds: [Number],
     markets: {
         h2h: { home: Number, draw: Number, away: Number },
@@ -113,17 +140,16 @@ const MatchSchema = new mongoose.Schema({
         btts: { yes: Number, no: Number },
         doubleChance: { '1x': Number, x2: Number, '12': Number }
     },
-    result: { // NEW: Injected result for settlement
+    result: {
         homeGoals: Number,
         awayGoals: Number,
         correctScore: String,
         btts: String,
-        winner: String // '1', 'X', or '2'
+        winner: String
     }
 });
 const Match = mongoose.model('Match', MatchSchema);
 
-// NEW: Expanded Bet schema with per-leg startTime, marketType, and status
 const BetSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
     ticketId: { type: String, required: true },
@@ -133,14 +159,15 @@ const BetSchema = new mongoose.Schema({
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
+    userTimezone: { type: String, default: 'Africa/Nairobi' }, // NEW: Snapshot at bet time
     legs: [{
         matchId: String,
         match: String,
         pick: String,
         selection: String,
-        marketType: { type: String, default: '1x2' }, // NEW: '1x2', 'correctScore', 'overUnder', 'btts', 'doubleChance'
+        marketType: { type: String, default: '1x2' },
         odds: Number,
-        startTime: Date, // NEW: For per-leg settlement timing
+        startTime: Date, // UTC
         status: { type: String, default: 'Open' },
         score: String,
         finalScore: String
@@ -197,7 +224,7 @@ app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
 });
 
 // ==========================================
-// DEPOSIT & M-PESA (unchanged logic)
+// DEPOSIT & M-PESA
 // ==========================================
 
 app.post('/api/deposit', async (req, res) => {
@@ -275,7 +302,7 @@ app.post('/api/megapay/webhook', async (req, res) => {
 });
 
 // ==========================================
-// AUTH (unchanged)
+// AUTH (with timezone detection)
 // ==========================================
 
 const authLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 15, message: { error: "Too many accounts created from this IP." }});
@@ -293,14 +320,15 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         const isKenyan = phone.startsWith('+254') || cleanPhone.startsWith('254') || (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
         const currency = isKenyan ? 'KES' : 'USD';
         const countryCode = isKenyan ? 'KE' : 'US';
+        const timezone = getTimezoneFromCountry(countryCode, phone); // NEW
 
-        const newUser = new User({ username, email, phone, password: hashedPassword, name: username, currency, countryCode });
+        const newUser = new User({ username, email, phone, password: hashedPassword, name: username, currency, countryCode, timezone });
         await newUser.save();
 
         await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready." }).save();
         sendTelegramMessage(`🎉 <b>NEW USER</b>\n👤 ${username}\n📞 ${phone}`);
 
-        res.status(201).json({ message: "User created", user: { _id: newUser._id, username: newUser.username, name: newUser.name, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode, oddsFormat: newUser.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
+        res.status(201).json({ message: "User created", user: { _id: newUser._id, username: newUser.username, name: newUser.name, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode, timezone: newUser.timezone, oddsFormat: newUser.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
     } catch (err) { res.status(500).json({ error: "Server error during registration." }); }
 });
 
@@ -317,7 +345,7 @@ app.post('/api/auth/login', async (req, res) => {
         const isMatch = await bcrypt.compare(password, user.password);
         if (!isMatch) return res.status(401).json({ error: "Wrong password." });
 
-        res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, oddsFormat: user.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
+        res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, timezone: user.timezone, oddsFormat: user.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
     } catch (err) { res.status(500).json({ error: "Server error during login." }); }
 });
 
@@ -338,7 +366,7 @@ app.get('/api/user/:id/notifications', async (req, res) => {
 });
 
 // ==========================================
-// WALLET (unchanged)
+// WALLET
 // ==========================================
 
 app.post('/api/wallet/deposit/manual', async (req, res) => {
@@ -385,31 +413,25 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
 
-// NEW: Helper to simulate live score based on injected final result
 function getSimulatedScore(match) {
     if (!match.result || match.status !== 'live' || !match.startTime) {
         return match.score || '0-0';
     }
     const now = new Date();
     const elapsed = now - new Date(match.startTime);
-    const duration = 2 * 60 * 60 * 1000; // 2 hours
+    const duration = 2 * 60 * 60 * 1000;
     const progress = Math.min(Math.max(elapsed / duration, 0), 1);
-
     const finalH = match.result.homeGoals || 0;
     const finalA = match.result.awayGoals || 0;
-
-    // Simple simulation: reveal goals progressively
     const simH = Math.floor(finalH * progress);
     const simA = Math.floor(finalA * progress);
-
     return `${simH}-${simA}`;
 }
 
-// UPDATED: Main page only shows UPCOMING matches (injected games disappear after start)
+// UPDATED: Return UTC startTime so frontend can localize
 app.get('/api/matches', async (req, res) => {
     try {
         const now = new Date();
-        // Only upcoming injected matches
         const dbMatches = await Match.find({
             $or: [
                 { status: 'upcoming' },
@@ -419,7 +441,7 @@ app.get('/api/matches', async (req, res) => {
 
         const formatted = dbMatches.map(m => {
             const obj = m.toObject();
-            obj.startTime = m.startTime;
+            obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.markets = m.markets || {};
             return obj;
         });
@@ -428,16 +450,9 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// UPDATED: Live matches endpoint with lifecycle filtering and result passing
+// UPDATED: Timezone-aware live matches — returns raw UTC times; frontend handles display
 app.get('/api/live-matches', async (req, res) => {
     try {
-        const userCountry = req.query.countryCode || 'GB';
-        let timezone = 'UTC';
-        if (['KE', 'UG', 'TZ'].includes(userCountry)) timezone = 'Africa/Nairobi';
-        else if (userCountry === 'US') timezone = 'America/New_York';
-        else if (userCountry === 'GB') timezone = 'Europe/London';
-        else if (userCountry === 'ZA') timezone = 'Africa/Johannesburg';
-
         const now = new Date();
         const nextWeek = new Date();
         nextWeek.setDate(now.getDate() + 7);
@@ -482,21 +497,6 @@ app.get('/api/live-matches', async (req, res) => {
             const isLiveNow = matchDate <= now;
             const mockScore = isLiveNow ? `${Math.floor(Math.random() * 3)}-${Math.floor(Math.random() * 3)}` : null;
 
-            const getTzDate = (d) => new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(d);
-
-            const matchDay = getTzDate(matchDate);
-            const todayDay = getTzDate(new Date());
-
-            const tmrw = new Date();
-            tmrw.setDate(tmrw.getDate() + 1);
-            const tomorrowDay = getTzDate(tmrw);
-
-            let formattedTime = matchDate.toLocaleTimeString('en-US', { timeZone: timezone, hour: '2-digit', minute: '2-digit', hour12: false });
-            let formattedDate = matchDate.toLocaleDateString('en-US', { timeZone: timezone, month: 'short', day: 'numeric' });
-
-            if (matchDay === todayDay) formattedDate = 'Today';
-            else if (matchDay === tomorrowDay) formattedDate = 'Tomorrow';
-
             let mappedSport = 'football';
             if (match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if (match.sport_key.includes('tennis')) mappedSport = 'tennis';
@@ -518,20 +518,17 @@ app.get('/api/live-matches', async (req, res) => {
                 away: match.away_team,
                 isLive: isLiveNow,
                 isFeatured: gradeScore > 50,
-                time: formattedTime,
-                date: formattedDate,
-                startTime: match.commence_time, // NEW
+                startTime: match.commence_time, // UTC ISO string
                 score: mockScore,
                 odds: oddsArray,
                 marketCount: Math.floor(Math.random() * 150) + 30,
                 gradeScore: gradeScore,
-                status: isLiveNow ? 'live' : 'upcoming', // NEW
+                status: isLiveNow ? 'live' : 'upcoming',
                 result: null,
                 finalScore: null
             };
         });
 
-        // UPDATED: Only include LIVE injected matches (upcoming ones moved to /api/matches, completed ones hidden)
         let dbMatches = [];
         try {
             dbMatches = (await Match.find({ status: 'live' })).map(m => ({
@@ -544,17 +541,15 @@ app.get('/api/live-matches', async (req, res) => {
                 away: m.away,
                 isLive: true,
                 isFeatured: true,
-                time: m.time || '15:00',
-                date: m.date || new Date().toLocaleDateString(),
-                startTime: m.startTime, // NEW
-                score: getSimulatedScore(m), // NEW: Simulated based on injected result
-                finalScore: m.finalScore || null, // NEW
+                startTime: m.startTime ? m.startTime.toISOString() : null,
+                score: getSimulatedScore(m),
+                finalScore: m.finalScore || null,
                 odds: m.odds || [2.1, 3.1, 2.8],
                 marketCount: m.markets ? (Object.keys(m.markets).length * 5 + 20) : 50,
                 gradeScore: 1000,
                 detailedMarkets: m.markets || {},
-                status: m.status, // NEW
-                result: m.result || null // NEW
+                status: m.status,
+                result: m.result || null
             }));
         } catch (e) {}
 
@@ -566,7 +561,6 @@ app.get('/api/live-matches', async (req, res) => {
     }
 });
 
-// SEARCH (unchanged)
 app.get('/api/search', async (req, res) => {
     try {
         const query = req.query.q;
@@ -579,7 +573,7 @@ app.get('/api/search', async (req, res) => {
 });
 
 // ==========================================
-// BETTING (UPDATED for per-leg settlement & new markets)
+// BETTING
 // ==========================================
 
 app.post('/api/bets/place', async (req, res) => {
@@ -591,7 +585,6 @@ app.post('/api/bets/place', async (req, res) => {
 
         user.balance -= stake; await user.save();
 
-        // NEW: Enrich each leg with startTime from match DB if available
         const trackedLegs = await Promise.all(legs.map(async leg => {
             let legStartTime = leg.startTime ? new Date(leg.startTime) : null;
 
@@ -600,14 +593,12 @@ app.post('/api/bets/place', async (req, res) => {
                 if (dbMatch && dbMatch.startTime) legStartTime = dbMatch.startTime;
             }
 
-            // Fallback: parse from leg.time if provided as "YYYY-MM-DD • HH:MM"
             if (!legStartTime && leg.time && leg.time.includes('•')) {
                 const [dPart, tPart] = leg.time.split(' • ');
                 const parsed = new Date(`${dPart} ${tPart}`);
                 if (!isNaN(parsed)) legStartTime = parsed;
             }
 
-            // Final fallback to now + 2hrs to prevent null
             if (!legStartTime) legStartTime = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
             return {
@@ -627,6 +618,7 @@ app.post('/api/bets/place', async (req, res) => {
             totalOdds,
             potentialReturn,
             currency,
+            userTimezone: user.timezone || 'Africa/Nairobi',
             legs: trackedLegs
         });
         await newBet.save();
@@ -649,7 +641,7 @@ app.get('/api/bets/user/:userId', async (req, res) => {
 });
 
 // ==========================================
-// ADMIN ROUTES (UPDATED)
+// ADMIN ROUTES
 // ==========================================
 
 app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
@@ -704,7 +696,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
-// UPDATED: Admin inject match with full markets and startTime
+// UPDATED: Admin inject match — startTime stored as UTC Date
 app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matchData = req.body;
@@ -713,11 +705,18 @@ app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
             return res.status(400).json({ error: "startTime is required for match lifecycle." });
         }
 
+        // Parse startTime as UTC Date
+        const parsedStart = new Date(matchData.startTime);
+        if (isNaN(parsedStart.getTime())) {
+            return res.status(400).json({ error: "Invalid startTime format. Use ISO 8601 (e.g. 2026-04-24T14:00:00Z)" });
+        }
+
         const newMatch = new Match({
             ...matchData,
             status: 'upcoming',
             isLive: false,
-            startTime: new Date(matchData.startTime),
+            startTime: parsedStart,
+            timezone: matchData.timezone || 'UTC',
             markets: matchData.markets || {},
             result: matchData.result || null
         });
@@ -757,7 +756,6 @@ app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to cancel bet." }); }
 });
 
-// UPDATED: Admin result injection now handles full result object and status
 app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
     try {
         const { score, finalScore, result, isLive, status } = req.body;
@@ -778,19 +776,13 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
 // BACKGROUND WORKERS
 // ==========================================
 
-// NEW: Match Lifecycle Manager
-// Auto-transition: upcoming -> live (at startTime), live -> completed (after 2hrs)
 setInterval(async () => {
     try {
         const now = new Date();
-
-        // Upcoming -> Live
         await Match.updateMany(
             { status: 'upcoming', startTime: { $lte: now } },
             { $set: { status: 'live', isLive: true } }
         );
-
-        // Live -> Completed (remove from live after 2 hours)
         const twoHoursAgo = new Date(now.getTime() - (2 * 60 * 60 * 1000));
         await Match.updateMany(
             { status: 'live', startTime: { $lte: twoHoursAgo } },
@@ -801,7 +793,7 @@ setInterval(async () => {
     }
 }, 60000);
 
-// UPDATED: Auto-Settlement Engine with per-leg 2hr settlement & expanded markets
+// Settlement uses UTC startTime + 2hrs — same moment everywhere
 setInterval(async () => {
     try {
         const openBets = await Bet.find({ status: { $in: ['Open', 'Partial'] } }).populate('userId');
@@ -818,7 +810,6 @@ setInterval(async () => {
                     const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
 
                     if (now >= settlementTime) {
-                        // Time to settle this leg
                         let matchResult = null;
                         try {
                             if (mongoose.Types.ObjectId.isValid(leg.matchId)) {
@@ -865,13 +856,11 @@ setInterval(async () => {
                                     if (pick === '12' && hG !== aG) isWin = true;
                                     break;
                                 default:
-                                    // Fallback to 1x2 logic
                                     if (pick === '1' && hG > aG) isWin = true;
                                     else if (pick === 'X' && hG === aG) isWin = true;
                                     else if (pick === '2' && aG > hG) isWin = true;
                             }
                         } else {
-                            // No admin result found after 2hrs - random fallback to prevent stuck bets
                             console.warn(`No result found for match ${leg.matchId || leg.match}, using random settlement.`);
                             isWin = Math.random() > 0.5;
                         }
@@ -892,7 +881,6 @@ setInterval(async () => {
                 }
             }
 
-            // Determine bet status
             if (hasLost) {
                 bet.status = 'Lost';
                 betUpdated = true;
@@ -916,7 +904,6 @@ setInterval(async () => {
                     }).save();
                 }
             } else if (betUpdated && !hasLost && hasOpen) {
-                // Some legs won, others still pending
                 bet.status = 'Partial';
             }
 
