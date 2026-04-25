@@ -28,8 +28,6 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
-
-
 // 🔓 UNIVERSAL CORS POLICY (Unblocks Mobile Testing & All Domains)
 app.use(cors({
     origin: function (origin, callback) {
@@ -429,19 +427,33 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
 
-function getSimulatedScore(match) {
-    if (!match.result || match.status !== 'live' || !match.startTime) {
-        return match.score || '0-0';
+// 🔥 DETERMINISTIC SCORE GENERATOR
+// Calculates a realistic, growing score based on the match ID and EXACT elapsed minutes.
+function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
+    const start = new Date(startTimeStr).getTime();
+    const now = new Date().getTime();
+    const elapsed = now - start;
+    
+    if (elapsed < 0) return null; // Game hasn't started
+
+    const duration = 2 * 60 * 60 * 1000; // 2 hours
+    const progress = Math.min(elapsed / duration, 1);
+
+    // If you set a score in Admin Panel, smoothly transition to that score over 90 mins
+    if (adminResultObj && adminResultObj.homeGoals !== undefined) {
+        return `${Math.floor(adminResultObj.homeGoals * progress)}-${Math.floor(adminResultObj.awayGoals * progress)}`;
     }
-    const now = new Date();
-    const elapsed = now - new Date(match.startTime);
-    const duration = 2 * 60 * 60 * 1000;
-    const progress = Math.min(Math.max(elapsed / duration, 0), 1);
-    const finalH = match.result.homeGoals || 0;
-    const finalA = match.result.awayGoals || 0;
-    const simH = Math.floor(finalH * progress);
-    const simA = Math.floor(finalA * progress);
-    return `${simH}-${simA}`;
+
+    // No admin score? Generate deterministic score using match ID
+    let seed = 0;
+    for (let i = 0; i < matchId.length; i++) {
+        seed += matchId.charCodeAt(i);
+    }
+    
+    const maxHome = seed % 4; 
+    const maxAway = (seed * 3) % 4;
+    
+    return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
 // 🛡️ FRONTEND FEED: Only shows Upcoming and Live matches to regular users. Completed matches are hidden from the feed.
@@ -455,6 +467,10 @@ app.get('/api/matches', async (req, res) => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.markets = m.markets || {};
+            // Sync live score if it's running
+            if (obj.status === 'live' && obj.startTime) {
+                obj.score = getDeterministicScore(obj._id.toString(), obj.startTime, obj.result);
+            }
             return obj;
         });
 
@@ -472,7 +488,7 @@ app.get('/api/live-matches', async (req, res) => {
         const fromDate = now.toISOString().split('.')[0] + 'Z';
         const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
 
-        // MASSIVELY EXPANDED ARRAY to pull 200+ games globally
+        // MASSIVELY EXPANDED ARRAY to pull games globally
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a',
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_england_championship',
@@ -485,11 +501,10 @@ app.get('/api/live-matches', async (req, res) => {
 
         let allApiMatches = [];
 
-        // Hit the API for all 25+ sports
+        // Hit the API for all sports
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                // Using uk,eu regions to prioritize 3-way soccer odds
-                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
+                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=us,uk&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
@@ -524,7 +539,6 @@ app.get('/api/live-matches', async (req, res) => {
             
             let homeOdds = 2.10, drawOdds = null, awayOdds = 2.80;
 
-            // SMART PARSER: Accurately extracts the draw, even if US bookies label it weirdly
             if (market && market.outcomes) {
                 const homeOutcome = market.outcomes.find(o => o.name === match.home_team);
                 const awayOutcome = market.outcomes.find(o => o.name === match.away_team);
@@ -536,8 +550,16 @@ app.get('/api/live-matches', async (req, res) => {
             }
 
             const matchDate = new Date(match.commence_time);
-            const isLiveNow = matchDate <= now;
-            const mockScore = isLiveNow ? `${Math.floor(Math.random() * 3)}-${Math.floor(Math.random() * 3)}` : null;
+            const elapsed = now.getTime() - matchDate.getTime();
+            const twoHours = 2 * 60 * 60 * 1000;
+
+            // 🛡️ API LIFECYCLE: Hide games from feed exactly 2 hours after kickoff
+            if (elapsed >= twoHours) return null;
+
+            const isLiveNow = elapsed >= 0 && elapsed < twoHours;
+            
+            // Generate live time-synced score
+            const liveScore = isLiveNow ? getDeterministicScore(match.id, match.commence_time, null) : null;
 
             let mappedSport = 'football';
             if (match.sport_key.includes('basketball')) mappedSport = 'basketball';
@@ -547,7 +569,7 @@ app.get('/api/live-matches', async (req, res) => {
             if (match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
             if (match.sport_key.includes('baseball')) mappedSport = 'baseball';
 
-            // FORCE SOCCER DRAW: If it's a football match but the bookie didn't give a draw line, calculate a realistic one so the X button works!
+            // FORCE SOCCER DRAW
             if (mappedSport === 'football' && !drawOdds) {
                 drawOdds = parseFloat(((homeOdds + awayOdds) / 1.5).toFixed(2));
                 if (drawOdds < 2.5) drawOdds = 3.10; 
@@ -568,7 +590,7 @@ app.get('/api/live-matches', async (req, res) => {
                 isLive: isLiveNow,
                 isFeatured: gradeScore > 50,
                 startTime: match.commence_time,
-                score: mockScore,
+                score: liveScore,
                 odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
                 gradeScore: gradeScore,
@@ -576,7 +598,7 @@ app.get('/api/live-matches', async (req, res) => {
                 result: null,
                 finalScore: null
             };
-        });
+        }).filter(m => m !== null); // Strip out completed games
 
         let dbMatches = [];
         try {
@@ -591,7 +613,7 @@ app.get('/api/live-matches', async (req, res) => {
                 isLive: true,
                 isFeatured: true,
                 startTime: m.startTime ? m.startTime.toISOString() : null,
-                score: getSimulatedScore(m),
+                score: getDeterministicScore(m._id.toString(), m.startTime, m.result), // Sync live score!
                 finalScore: m.finalScore || null,
                 odds: m.odds || [2.1, 3.1, 2.8],
                 marketCount: m.markets ? (Object.keys(m.markets).length * 5 + 20) : 50,
@@ -604,7 +626,7 @@ app.get('/api/live-matches', async (req, res) => {
 
         const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
         
-        // Bumped limit up to 500 to ensure all 200+ games make it to the frontend!
+        // Return up to 500 games
         res.status(200).json(combined.slice(0, 500));
     } catch (err) {
         console.error("Live Matches Error:", err);
@@ -617,6 +639,7 @@ app.get('/api/search', async (req, res) => {
         const query = req.query.q;
         if (!query) return res.status(200).json([]);
         const dbResults = await Match.find({
+            status: { $in: ['upcoming', 'live'] },
             $or: [{ home: { $regex: query, $options: 'i' } }, { away: { $regex: query, $options: 'i' } }, { league: { $regex: query, $options: 'i' } }]
         });
         res.status(200).json(dbResults);
@@ -811,7 +834,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
-// 🛡️ ADMIN FEED: Fetches ALL matches (Upcoming, Live, and Completed) so you can fix results for any game.
+// 🛡️ ADMIN FEED: Fetches ALL matches (Upcoming, Live, and Completed)
 app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matches = await Match.find().sort({ startTime: -1 }).limit(500);
