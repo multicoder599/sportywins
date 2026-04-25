@@ -28,7 +28,7 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
-// 🔓 UNIVERSAL CORS POLICY (Unblocks Mobile Testing & All Domains)
+// 🔓 UNIVERSAL CORS POLICY
 app.use(cors({
     origin: function (origin, callback) {
         callback(null, true);
@@ -351,7 +351,7 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
-// 🛡️ FRONTEND FEED: Only shows Upcoming and Live matches (Admin) to regular users.
+// 🛡️ FRONTEND FEED: Only shows Upcoming matches to regular users.
 app.get('/api/matches', async (req, res) => {
     try {
         const dbMatches = await Match.find({
@@ -372,16 +372,10 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// 🛡️ HYBRID FEED: Fetches ONLY upcoming games from API, and live games from Admin DB.
+// 🛡️ HYBRID FEED: Fetches ONLY UPCOMING games from API, and LIVE games from Admin DB.
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
-        const nextWeek = new Date();
-        nextWeek.setDate(now.getDate() + 7);
-
-        // Fetch API games strictly from NOW (no past games, no live games)
-        const fromDate = now.toISOString().split('.')[0] + 'Z';
-        const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
 
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a',
@@ -395,9 +389,10 @@ app.get('/api/live-matches', async (req, res) => {
 
         let allApiMatches = [];
 
+        // Fetching without strict time filters so the API doesn't skip today's slate or jump to next week
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
+                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
@@ -405,6 +400,13 @@ app.get('/api/live-matches', async (req, res) => {
         }));
 
         let formattedMatches = allApiMatches.map((match) => {
+            const matchDate = new Date(match.commence_time);
+            const elapsed = now.getTime() - matchDate.getTime();
+
+            // 🛑 RULE: If the API game has already reached its start time, DELETE IT.
+            // Only Admin games are allowed to be Live.
+            if (elapsed >= 0) return null;
+
             const market = match.bookmakers[0]?.markets[0];
             let homeOdds = 2.10, drawOdds = null, awayOdds = 2.80;
 
@@ -436,25 +438,25 @@ app.get('/api/live-matches', async (req, res) => {
             if (match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
 
             return {
-                id: match.id,
+                id: 'api_' + match.id, // Prefix ID so it never clashes
                 sport: mappedSport,
                 region: 'Global',
                 league: match.sport_title,
                 country: mappedSport === 'basketball' || mappedSport === 'rugby' || mappedSport === 'baseball' ? 'us' : 'gb-eng',
                 home: match.home_team,
                 away: match.away_team,
-                isLive: false, // API games are strictly UPCOMING
+                isLive: false, // Strict: API games are never Live
                 isFeatured: gradeScore > 50,
-                startTime: match.commence_time,
+                startTime: match.commence_time, // Standard UTC format
                 score: null,
                 odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
                 gradeScore: gradeScore,
-                status: 'upcoming',
+                status: 'upcoming', // Strict: API games are only Upcoming
                 result: null,
                 finalScore: null
             };
-        }); 
+        }).filter(m => m !== null); 
 
         let dbMatches = [];
         try {
@@ -512,18 +514,11 @@ app.post('/api/bets/place', async (req, res) => {
         stake = parseFloat(stake);
         totalOdds = parseFloat(totalOdds);
 
-        if (isNaN(stake) || stake <= 0) {
-            return res.status(400).json({ error: "Invalid stake amount." });
-        }
-        if (isNaN(totalOdds) || totalOdds < 1) {
-            return res.status(400).json({ error: "Invalid total odds." });
-        }
+        if (isNaN(stake) || stake <= 0) return res.status(400).json({ error: "Invalid stake amount." });
+        if (isNaN(totalOdds) || totalOdds < 1) return res.status(400).json({ error: "Invalid total odds." });
 
         potentialReturn = parseFloat((stake * totalOdds).toFixed(2));
-
-        if (!Array.isArray(legs) || legs.length === 0) {
-            return res.status(400).json({ error: "No bet legs provided." });
-        }
+        if (!Array.isArray(legs) || legs.length === 0) return res.status(400).json({ error: "No bet legs provided." });
 
         const user = await User.findById(userId);
         if (!user) return res.status(404).json({ error: "User not found." });
@@ -534,142 +529,62 @@ app.post('/api/bets/place', async (req, res) => {
 
         const trackedLegs = await Promise.all(legs.map(async leg => {
             let legStartTime = leg.startTime ? new Date(leg.startTime) : null;
-
             if (leg.matchId && mongoose.Types.ObjectId.isValid(leg.matchId)) {
                 const dbMatch = await Match.findById(leg.matchId).select('startTime');
                 if (dbMatch && dbMatch.startTime) legStartTime = dbMatch.startTime;
             }
-
             if (!legStartTime && leg.time && leg.time.includes('•')) {
                 const [dPart, tPart] = leg.time.split(' • ');
                 const parsed = new Date(`${dPart} ${tPart}`);
                 if (!isNaN(parsed)) legStartTime = parsed;
             }
-
             if (!legStartTime) legStartTime = new Date(Date.now() + 2 * 60 * 60 * 1000);
 
             return {
-                matchId: leg.matchId,
-                match: leg.match,
-                pick: leg.pick,
-                selection: leg.selection,
-                marketType: leg.marketType || '1x2',
-                odds: parseFloat(leg.odds) || 0,
-                startTime: legStartTime,
-                status: 'Open',
-                score: null,
-                finalScore: null
+                matchId: leg.matchId, match: leg.match, pick: leg.pick, selection: leg.selection,
+                marketType: leg.marketType || '1x2', odds: parseFloat(leg.odds) || 0,
+                startTime: legStartTime, status: 'Open', score: null, finalScore: null
             };
         }));
 
         const newBet = new Bet({
-            userId: user._id,
-            ticketId: "SW-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
-            bookingCode: bookingCode || undefined,
-            stake,
-            totalOdds,
-            potentialReturn,
-            currency: currency || user.currency,
-            userTimezone: user.timezone || 'Africa/Nairobi',
-            legs: trackedLegs
+            userId: user._id, ticketId: "SW-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
+            bookingCode: bookingCode || undefined, stake, totalOdds, potentialReturn,
+            currency: currency || user.currency, userTimezone: user.timezone || 'Africa/Nairobi', legs: trackedLegs
         });
         await newBet.save();
 
-        await Transaction.create({
-            userId,
-            type: 'Bet Placed',
-            amount: -stake,
-            currency: newBet.currency,
-            status: 'Completed'
-        });
-
+        await Transaction.create({ userId, type: 'Bet Placed', amount: -stake, currency: newBet.currency, status: 'Completed' });
         sendTelegramMessage(`🎲 <b>NEW BET PLACED</b>\n👤 User: ${user.username}\n💰 Stake: ${stake} ${newBet.currency}\n🎯 Win: ${potentialReturn} ${newBet.currency}`);
 
-        res.status(201).json({
-            message: "Bet placed successfully!",
-            ticketId: newBet.ticketId,
-            newBalance: user.balance,
-            bet: newBet
-        });
-    } catch (err) {
-        console.error("Bet placement error:", err);
-        res.status(500).json({ error: "Failed to place bet." });
-    }
+        res.status(201).json({ message: "Bet placed successfully!", ticketId: newBet.ticketId, newBalance: user.balance, bet: newBet });
+    } catch (err) { res.status(500).json({ error: "Failed to place bet." }); }
 });
 
-app.get('/api/bets/user/:userId', async (req, res) => {
-    try {
-        const bets = await Bet.find({ userId: req.params.userId }).sort({ date: -1 });
-        res.status(200).json(bets);
-    } catch (err) { res.status(500).json({ error: "Failed to fetch bets." }); }
-});
-
+app.get('/api/bets/user/:userId', async (req, res) => { try { res.status(200).json(await Bet.find({ userId: req.params.userId }).sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
 app.post('/api/bets/save-code', async (req, res) => {
     try {
         const { code, legs, stake, totalOdds, potentialReturn, currency } = req.body;
-        if (!code || !legs || legs.length === 0) {
-            return res.status(400).json({ error: "Code and legs are required." });
-        }
-        await BookingSlip.findOneAndUpdate(
-            { code: code.toUpperCase() },
-            { code: code.toUpperCase(), legs, stake, totalOdds, potentialReturn, currency },
-            { upsert: true, new: true }
-        );
+        await BookingSlip.findOneAndUpdate({ code: code.toUpperCase() }, { code: code.toUpperCase(), legs, stake, totalOdds, potentialReturn, currency }, { upsert: true, new: true });
         res.status(200).json({ success: true, message: "Code saved." });
-    } catch (err) {
-        console.error("Save code error:", err);
-        res.status(500).json({ error: "Failed to save code." });
-    }
+    } catch (err) { res.status(500).send(); }
 });
-
-app.get('/api/bets/code/:code', async (req, res) => {
-    try {
-        const slip = await BookingSlip.findOne({ code: req.params.code.toUpperCase() });
-        if (!slip) return res.status(404).json({ error: "Code not found or expired." });
-        res.status(200).json(slip);
-    } catch (err) {
-        res.status(500).json({ error: "Failed to load code." });
-    }
-});
+app.get('/api/bets/code/:code', async (req, res) => { try { const slip = await BookingSlip.findOne({ code: req.params.code.toUpperCase() }); if (!slip) return res.status(404).send(); res.status(200).json(slip); } catch (err) { res.status(500).send(); } });
 
 // ==========================================
 // ADMIN ROUTES
 // ==========================================
 
-app.get('/api/admin/users', verifyAdminToken, async (req, res) => {
-    try { const users = await User.find().select('-password'); res.status(200).json(users); }
-    catch (err) { res.status(500).json({ error: "Failed to fetch users." }); }
-});
-
-app.put('/api/admin/users/:id/balance/set', verifyAdminToken, async (req, res) => {
-    try {
-        const { amount } = req.body;
-        const user = await User.findById(req.params.id);
-        if (!user) return res.status(404).json({ error: "User not found." });
-        user.balance = parseFloat(amount); await user.save();
-        res.status(200).json({ message: "Balance updated successfully!", balance: user.balance });
-    } catch (err) { res.status(500).json({ error: "Failed to update balance." }); }
-});
-
-app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
-    try { await User.findByIdAndDelete(req.params.id); res.status(200).json({ message: "User deleted." }); }
-    catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
-});
-
-app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
-    try {
-        const statusFilter = req.query.status || 'Pending';
-        const txns = await Transaction.find({ status: statusFilter }).populate('userId', 'username').sort({ date: -1 });
-        res.status(200).json(txns);
-    } catch (err) { res.status(500).json({ error: "Failed to fetch transactions." }); }
-});
+app.get('/api/admin/users', verifyAdminToken, async (req, res) => { try { res.status(200).json(await User.find().select('-password')); } catch (err) { res.status(500).send(); } });
+app.put('/api/admin/users/:id/balance/set', verifyAdminToken, async (req, res) => { try { const user = await User.findById(req.params.id); user.balance = parseFloat(req.body.amount); await user.save(); res.status(200).json({ balance: user.balance }); } catch (err) { res.status(500).send(); } });
+app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => { try { await User.findByIdAndDelete(req.params.id); res.status(200).send(); } catch (err) { res.status(500).send(); } });
+app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => { try { res.status(200).json(await Transaction.find({ status: req.query.status || 'Pending' }).populate('userId', 'username').sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
 
 app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res) => {
     try {
         const action = req.params.action.toLowerCase();
         const txn = await Transaction.findById(req.params.id);
-        if (!txn) return res.status(404).json({ error: "Transaction not found." });
-        if (txn.status !== 'Pending') return res.status(400).json({ error: "Transaction already processed." });
+        if (!txn || txn.status !== 'Pending') return res.status(400).send();
 
         if (action === 'approve') {
             txn.status = 'Completed';
@@ -681,80 +596,37 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
             txn.status = 'Failed';
             if (txn.type === 'Withdrawal') {
                 const user = await User.findById(txn.userId); user.balance += txn.amount; await user.save();
-                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of ${txn.amount} ${txn.currency} was rejected. Funds returned.` }).save();
             }
         }
         await txn.save(); res.status(200).json({ message: `Transaction ${action}d.` });
-    } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
+    } catch (err) { res.status(500).send(); }
 });
 
-// 🛡️ ADMIN FEED: Fetches ALL matches (Upcoming, Live, and Completed)
-app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
-    try {
-        const matches = await Match.find().sort({ startTime: -1 }).limit(500);
-        res.status(200).json(matches);
-    } catch (err) {
-        console.error("Admin matches error:", err);
-        res.status(500).json({ error: "Failed to fetch matches." });
-    }
-});
+app.get('/api/admin/matches', verifyAdminToken, async (req, res) => { try { res.status(200).json(await Match.find().sort({ startTime: -1 }).limit(500)); } catch (err) { res.status(500).send(); } });
 
 app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matchData = req.body;
-
-        if (!matchData.startTime) {
-            return res.status(400).json({ error: "startTime is required for match lifecycle." });
-        }
-
         const parsedStart = new Date(matchData.startTime);
-        if (isNaN(parsedStart.getTime())) {
-            return res.status(400).json({ error: "Invalid startTime format. Use ISO 8601 (e.g. 2026-04-24T14:00:00Z)" });
-        }
+        if (isNaN(parsedStart.getTime())) return res.status(400).send();
 
-        const newMatch = new Match({
-            ...matchData,
-            status: 'upcoming',
-            isLive: false,
-            startTime: parsedStart,
-            timezone: matchData.timezone || 'UTC',
-            markets: matchData.markets || {},
-            result: matchData.result || null
-        });
-
+        const newMatch = new Match({ ...matchData, status: 'upcoming', isLive: false, startTime: parsedStart, timezone: matchData.timezone || 'UTC', markets: matchData.markets || {}, result: matchData.result || null });
         await newMatch.save();
         res.status(201).json({ message: "Match injected successfully!", match: newMatch });
-    } catch (err) {
-        console.error("Admin inject error:", err);
-        res.status(500).json({ error: "Failed to add match." });
-    }
+    } catch (err) { res.status(500).send(); }
 });
 
-app.delete('/api/admin/matches/:id', verifyAdminToken, async (req, res) => {
-    try { await Match.findByIdAndDelete(req.params.id); res.status(200).json({ message: "Match deleted." }); }
-    catch (err) { res.status(500).json({ error: "Failed to delete match." }); }
-});
-
-app.get('/api/admin/bets', verifyAdminToken, async (req, res) => {
-    try { const bets = await Bet.find().populate('userId', 'username phone').sort({ date: -1 }); res.status(200).json(bets); }
-    catch (err) { res.status(500).json({ error: "Failed to fetch all bets." }); }
-});
-
+app.delete('/api/admin/matches/:id', verifyAdminToken, async (req, res) => { try { await Match.findByIdAndDelete(req.params.id); res.status(200).send(); } catch (err) { res.status(500).send(); } });
+app.get('/api/admin/bets', verifyAdminToken, async (req, res) => { try { res.status(200).json(await Bet.find().populate('userId', 'username phone').sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
 app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     try {
         const bet = await Bet.findById(req.params.id);
-        if (!bet) return res.status(404).json({ error: "Bet not found." });
-        if (bet.status !== 'Open' && bet.status !== 'Partial') return res.status(400).json({ error: "Only open/partial bets can be cancelled." });
-
+        if (!bet || (bet.status !== 'Open' && bet.status !== 'Partial')) return res.status(400).send();
         bet.status = 'Cancelled'; await bet.save();
         const user = await User.findById(bet.userId);
-        if (user) {
-            user.balance += bet.stake; await user.save();
-            await Transaction.create({ userId: user._id, type: 'Refund', amount: bet.stake, currency: bet.currency, status: 'Completed' });
-            await new Notification({ userId: user._id, title: "Bet Cancelled", message: `Your bet ${bet.ticketId} was cancelled by administration and your stake of ${bet.stake} ${bet.currency} has been refunded.` }).save();
-        }
-        res.status(200).json({ message: "Bet cancelled and stake refunded.", bet });
-    } catch (err) { res.status(500).json({ error: "Failed to cancel bet." }); }
+        if (user) { user.balance += bet.stake; await user.save(); }
+        res.status(200).send();
+    } catch (err) { res.status(500).send(); }
 });
 
 app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
@@ -768,39 +640,18 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
         if (result !== undefined) {
             if (typeof result === 'string' && result.includes('-')) {
                 const [h, a] = result.split('-').map(s => parseInt(s.trim()));
-                updateData.result = {
-                    homeGoals: h || 0,
-                    awayGoals: a || 0,
-                    correctScore: result,
-                    winner: h > a ? 'home' : a > h ? 'away' : 'draw'
-                };
+                updateData.result = { homeGoals: h || 0, awayGoals: a || 0, correctScore: result, winner: h > a ? 'home' : a > h ? 'away' : 'draw' };
             } else if (typeof result === 'object' && result !== null) {
-                const h = parseInt(result.homeGoals);
-                const a = parseInt(result.awayGoals);
-                updateData.result = {
-                    homeGoals: isNaN(h) ? 0 : h,
-                    awayGoals: isNaN(a) ? 0 : a,
-                    correctScore: result.correctScore || `${h}-${a}`,
-                    btts: result.btts,
-                    winner: result.winner || (h > a ? 'home' : a > h ? 'away' : 'draw')
-                };
-            } else {
-                updateData.result = result;
-            }
+                const h = parseInt(result.homeGoals); const a = parseInt(result.awayGoals);
+                updateData.result = { homeGoals: isNaN(h) ? 0 : h, awayGoals: isNaN(a) ? 0 : a, correctScore: result.correctScore || `${h}-${a}`, btts: result.btts, winner: result.winner || (h > a ? 'home' : a > h ? 'away' : 'draw') };
+            } else { updateData.result = result; }
         }
 
         if (!updateData.result && (finalScore || score)) {
             const scoreStr = finalScore || score;
             if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
                 const [h, a] = scoreStr.split('-').map(s => parseInt(s.trim()));
-                if (!isNaN(h) && !isNaN(a)) {
-                    updateData.result = {
-                        homeGoals: h,
-                        awayGoals: a,
-                        correctScore: scoreStr,
-                        winner: h > a ? 'home' : a > h ? 'away' : 'draw'
-                    };
-                }
+                if (!isNaN(h) && !isNaN(a)) updateData.result = { homeGoals: h, awayGoals: a, correctScore: scoreStr, winner: h > a ? 'home' : a > h ? 'away' : 'draw' };
             }
         }
 
@@ -808,12 +659,8 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
         if (status !== undefined) updateData.status = status;
 
         const match = await Match.findByIdAndUpdate(req.params.id, updateData, { new: true });
-        if (!match) return res.status(404).json({ error: "Match not found." });
         res.status(200).json({ message: "Result updated", match });
-    } catch (err) {
-        console.error("Admin result error:", err);
-        res.status(500).json({ error: "Failed to update result." });
-    }
+    } catch (err) { res.status(500).send(); }
 });
 
 // ==========================================
@@ -823,18 +670,10 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
 setInterval(async () => {
     try {
         const now = new Date();
-        await Match.updateMany(
-            { status: 'upcoming', startTime: { $lte: now } },
-            { $set: { status: 'live', isLive: true } }
-        );
+        await Match.updateMany({ status: 'upcoming', startTime: { $lte: now } }, { $set: { status: 'live', isLive: true } });
         const twoHoursAgo = new Date(now.getTime() - (2 * 60 * 60 * 1000));
-        await Match.updateMany(
-            { status: 'live', startTime: { $lte: twoHoursAgo } },
-            { $set: { status: 'completed', isLive: false } }
-        );
-    } catch (err) {
-        console.error("Match Lifecycle Error:", err);
-    }
+        await Match.updateMany({ status: 'live', startTime: { $lte: twoHoursAgo } }, { $set: { status: 'completed', isLive: false } });
+    } catch (err) {}
 }, 60000);
 
 setInterval(async () => {
@@ -843,144 +682,65 @@ setInterval(async () => {
         const now = new Date();
 
         for (let bet of openBets) {
-            let betUpdated = false;
-            let allSettled = true;
-            let hasLost = false;
+            let betUpdated = false; let allSettled = true; let hasLost = false;
 
             for (let leg of bet.legs) {
-                if (leg.status !== 'Open') {
-                    if (leg.status === 'Lost') hasLost = true;
-                    continue;
-                }
-
+                if (leg.status !== 'Open') { if (leg.status === 'Lost') hasLost = true; continue; }
                 const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
-
-                if (now < settlementTime) {
-                    allSettled = false;
-                    continue;
-                }
+                if (now < settlementTime) { allSettled = false; continue; }
 
                 let matchResult = null;
                 try {
-                    if (mongoose.Types.ObjectId.isValid(leg.matchId)) {
-                        matchResult = await Match.findById(leg.matchId);
-                    }
-                    if (!matchResult && leg.match) {
-                        const homeTeam = leg.match.split(' v ')[0];
-                        matchResult = await Match.findOne({ home: homeTeam, startTime: leg.startTime });
-                    }
-                } catch (e) {
-                    console.error("Match lookup error:", e);
-                }
+                    if (mongoose.Types.ObjectId.isValid(leg.matchId)) matchResult = await Match.findById(leg.matchId);
+                    if (!matchResult && leg.match) matchResult = await Match.findOne({ home: leg.match.split(' v ')[0], startTime: leg.startTime });
+                } catch (e) {}
 
                 let resultObj = null;
                 if (matchResult) {
-                    if (matchResult.result &&
-                        matchResult.result.homeGoals !== undefined &&
-                        matchResult.result.awayGoals !== undefined) {
-                        resultObj = matchResult.result;
-                    } else {
+                    if (matchResult.result && matchResult.result.homeGoals !== undefined && matchResult.result.awayGoals !== undefined) { resultObj = matchResult.result; } 
+                    else {
                         const scoreStr = matchResult.finalScore || matchResult.score;
                         if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
                             const parts = scoreStr.split('-').map(s => parseInt(s.trim()));
-                            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-                                resultObj = {
-                                    homeGoals: parts[0],
-                                    awayGoals: parts[1],
-                                    correctScore: scoreStr
-                                };
-                            }
+                            if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) resultObj = { homeGoals: parts[0], awayGoals: parts[1], correctScore: scoreStr };
                         }
                     }
                 }
 
-                let isWin = false;
-                const pick = (leg.pick || leg.selection || '').toString().trim();
-                const marketType = leg.marketType || '1x2';
+                let isWin = false; const pick = (leg.pick || leg.selection || '').toString().trim(); const marketType = leg.marketType || '1x2';
 
                 if (resultObj) {
-                    const hG = parseInt(resultObj.homeGoals) || 0;
-                    const aG = parseInt(resultObj.awayGoals) || 0;
-                    const total = hG + aG;
-
+                    const hG = parseInt(resultObj.homeGoals) || 0; const aG = parseInt(resultObj.awayGoals) || 0; const total = hG + aG;
                     switch (marketType) {
-                        case '1x2':
-                            if (pick === '1' && hG > aG) isWin = true;
-                            else if (pick === 'X' && hG === aG) isWin = true;
-                            else if (pick === '2' && aG > hG) isWin = true;
-                            break;
-                        case 'correctScore':
-                            if (pick === `${hG}-${aG}`) isWin = true;
-                            break;
-                        case 'overUnder':
-                            const line = parseFloat(pick.replace(/[^0-9.]/g, ''));
-                            if (pick.includes('Over') && total > line) isWin = true;
-                            if (pick.includes('Under') && total < line) isWin = true;
-                            break;
-                        case 'btts':
-                            const bothScored = hG > 0 && aG > 0;
-                            if (pick === 'Yes' && bothScored) isWin = true;
-                            if (pick === 'No' && !bothScored) isWin = true;
-                            break;
-                        case 'doubleChance':
-                            if (pick === '1X' && hG >= aG) isWin = true;
-                            if (pick === 'X2' && aG >= hG) isWin = true;
-                            if (pick === '12' && hG !== aG) isWin = true;
-                            break;
-                        default:
-                            if (pick === '1' && hG > aG) isWin = true;
-                            else if (pick === 'X' && hG === aG) isWin = true;
-                            else if (pick === '2' && aG > hG) isWin = true;
+                        case '1x2': if (pick === '1' && hG > aG) isWin = true; else if (pick === 'X' && hG === aG) isWin = true; else if (pick === '2' && aG > hG) isWin = true; break;
+                        case 'correctScore': if (pick === `${hG}-${aG}`) isWin = true; break;
+                        case 'overUnder': const line = parseFloat(pick.replace(/[^0-9.]/g, '')); if (pick.includes('Over') && total > line) isWin = true; if (pick.includes('Under') && total < line) isWin = true; break;
+                        case 'btts': const bothScored = hG > 0 && aG > 0; if (pick === 'Yes' && bothScored) isWin = true; if (pick === 'No' && !bothScored) isWin = true; break;
+                        case 'doubleChance': if (pick === '1X' && hG >= aG) isWin = true; if (pick === 'X2' && aG >= hG) isWin = true; if (pick === '12' && hG !== aG) isWin = true; break;
+                        default: if (pick === '1' && hG > aG) isWin = true; else if (pick === 'X' && hG === aG) isWin = true; else if (pick === '2' && aG > hG) isWin = true;
                     }
                 } else {
-                    console.warn(`No admin result for match ${leg.matchId || leg.match} after 2hrs. Random settlement.`);
                     isWin = Math.random() > 0.5;
                 }
 
                 leg.status = isWin ? 'Won' : 'Lost';
-                leg.finalScore = matchResult
-                    ? (matchResult.finalScore || matchResult.score || `${resultObj?.homeGoals || 0}-${resultObj?.awayGoals || 0}`)
-                    : null;
-                betUpdated = true;
-
-                if (leg.status === 'Lost') hasLost = true;
+                leg.finalScore = matchResult ? (matchResult.finalScore || matchResult.score || `${resultObj?.homeGoals || 0}-${resultObj?.awayGoals || 0}`) : null;
+                betUpdated = true; if (leg.status === 'Lost') hasLost = true;
             }
 
-            if (hasLost) {
-                bet.status = 'Lost';
-                betUpdated = true;
-            } else if (allSettled) {
-                bet.status = 'Won';
-                betUpdated = true;
+            if (hasLost) { bet.status = 'Lost'; betUpdated = true; } 
+            else if (allSettled) {
+                bet.status = 'Won'; betUpdated = true;
                 const user = await User.findById(bet.userId);
                 if (user) {
-                    user.balance += bet.potentialReturn;
-                    await user.save();
-                    await Transaction.create({
-                        userId: user._id,
-                        type: 'Win',
-                        amount: bet.potentialReturn,
-                        currency: bet.currency,
-                        status: 'Success'
-                    });
-                    await new Notification({
-                        userId: user._id,
-                        title: "Bet Won! 🎉",
-                        message: `Your bet ${bet.ticketId} has won! ${bet.potentialReturn} ${bet.currency} credited.`
-                    }).save();
+                    user.balance += bet.potentialReturn; await user.save();
+                    await Transaction.create({ userId: user._id, type: 'Win', amount: bet.potentialReturn, currency: bet.currency, status: 'Success' });
+                    await new Notification({ userId: user._id, title: "Bet Won! 🎉", message: `Your bet ${bet.ticketId} has won! ${bet.potentialReturn} ${bet.currency} credited.` }).save();
                 }
-            } else if (betUpdated) {
-                bet.status = 'Partial';
-            }
-
-            if (betUpdated) {
-                bet.markModified('legs');
-                await bet.save();
-            }
+            } else if (betUpdated) { bet.status = 'Partial'; }
+            if (betUpdated) { bet.markModified('legs'); await bet.save(); }
         }
-    } catch (err) {
-        console.error("Auto-Settlement Engine Error:", err);
-    }
+    } catch (err) {}
 }, 60000);
 
 const PORT = process.env.PORT || 5000;
