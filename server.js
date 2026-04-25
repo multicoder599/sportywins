@@ -438,7 +438,7 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 // MATCHES & ODDS API
 // ==========================================
 
-const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
+const ODDS_API_KEY = process.env.ODDS_API_KEY || 'd374910cb48a45ed2f6004cfd617f4e4';
 
 function getSimulatedScore(match) {
     if (!match.result || match.status !== 'live' || !match.startTime) {
