@@ -411,20 +411,17 @@ app.get('/api/live-matches', async (req, res) => {
         let formattedMatches = allApiMatches.map((match) => {
             let matchDate = new Date(match.commence_time);
 
-            // 🛠️ DATA SANITIZER: Fix the Parlay API "19:00:00Z" fallback time bug
             if (match.commence_time && match.commence_time.includes('19:00:00Z')) {
                 let seed = 0;
                 for (let i = 0; i < match.id.length; i++) seed += match.id.charCodeAt(i);
                 
-                // Generates a stable afternoon UTC kickoff based on Match ID
-                const hourOffset = seed % 6; // 0 to 5 hours offset
+                const hourOffset = seed % 6; 
                 const minuteOffset = (seed % 2) === 0 ? 30 : 0;
                 matchDate.setUTCHours(12 + hourOffset, minuteOffset, 0, 0); 
             }
 
             const elapsed = now.getTime() - matchDate.getTime();
 
-            // 🛑 RULE: Delete any game that has already started. API is for Upcoming only.
             if (elapsed >= 0) return null;
 
             const market = match.bookmakers[0]?.markets[0];
@@ -453,7 +450,6 @@ app.get('/api/live-matches', async (req, res) => {
                 if (drawOdds < 2.5) drawOdds = 3.10; 
             }
 
-            // 🛠️ DATA SANITIZER: Fix League Names and Flags
             let leagueName = match.sport_title || 'League';
             if (match.sport_key === 'soccer_germany_bundesliga') leagueName = 'Bundesliga';
             if (match.sport_key === 'soccer_spain_la_liga') leagueName = 'La Liga';
@@ -486,7 +482,7 @@ app.get('/api/live-matches', async (req, res) => {
                 away: match.away_team,
                 isLive: false,
                 isFeatured: gradeScore > 50,
-                startTime: matchDate.toISOString(), // Uses the fixed/sanitized time
+                startTime: matchDate.toISOString(), 
                 score: null,
                 odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
@@ -636,6 +632,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
             txn.status = 'Failed';
             if (txn.type === 'Withdrawal') {
                 const user = await User.findById(txn.userId); user.balance += txn.amount; await user.save();
+                await new Notification({ userId: user._id, title: "Withdrawal Rejected", message: `Your withdrawal of ${txn.amount} ${txn.currency} was rejected. Funds returned.` }).save();
             }
         }
         await txn.save(); res.status(200).json({ message: `Transaction ${action}d.` });
@@ -695,11 +692,31 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
             }
         }
 
-        if (isLive !== undefined) updateData.isLive = isLive;
-        if (status !== undefined) updateData.status = status;
+        // 🛑 NEW LOGIC: FORCE STATUS BASED ON STRICT TIMELINE, IGNORE ADMIN PANEL'S 'COMPLETED' STATUS
+        const match = await Match.findById(req.params.id);
+        if (!match) return res.status(404).json({ error: "Match not found." });
 
-        const match = await Match.findByIdAndUpdate(req.params.id, updateData, { new: true });
-        res.status(200).json({ message: "Result updated", match });
+        const now = new Date().getTime();
+        const start = new Date(match.startTime).getTime();
+        const elapsed = now - start;
+        const twoHours = 2 * 60 * 60 * 1000;
+
+        if (elapsed < 0) {
+            // Game hasn't started yet. Lock it to upcoming.
+            updateData.status = 'upcoming';
+            updateData.isLive = false;
+        } else if (elapsed >= 0 && elapsed < twoHours) {
+            // Game is currently in its 2-hour playing window. Lock it to Live.
+            updateData.status = 'live';
+            updateData.isLive = true;
+        } else {
+            // Game is actually over. Allow the admin panel's status.
+            if (isLive !== undefined) updateData.isLive = isLive;
+            if (status !== undefined) updateData.status = status;
+        }
+
+        const updatedMatch = await Match.findByIdAndUpdate(req.params.id, updateData, { new: true });
+        res.status(200).json({ message: "Result updated. Timeline locked.", match: updatedMatch });
     } catch (err) { res.status(500).send(); }
 });
 
@@ -726,6 +743,8 @@ setInterval(async () => {
 
             for (let leg of bet.legs) {
                 if (leg.status !== 'Open') { if (leg.status === 'Lost') hasLost = true; continue; }
+                
+                // Bets strictly settle 2 hours after kickoff
                 const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
                 if (now < settlementTime) { allSettled = false; continue; }
 
