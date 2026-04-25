@@ -28,6 +28,7 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
+// 🔒 STRICT CORS POLICY
 const allowedOrigins = [
     'https://sportywins.onrender.com',
     'https://winsadmin.surge.sh',
@@ -35,10 +36,16 @@ const allowedOrigins = [
     'http://127.0.0.1:5500'
 ];
 
-// 🔒 UNIVERSAL CORS POLICY
 app.use(cors({
     origin: function (origin, callback) {
-        callback(null, true);
+        // Allow requests with no origin (like mobile apps/Median or server-to-server requests)
+        if (!origin) return callback(null, true);
+        
+        if (allowedOrigins.indexOf(origin) === -1) {
+            const msg = 'The CORS policy for this site does not allow access from the specified Origin.';
+            return callback(new Error(msg), false);
+        }
+        return callback(null, true);
     },
     credentials: true
 }));
@@ -113,7 +120,7 @@ const UserSchema = new mongoose.Schema({
     currency: { type: String, default: 'KES' },
     oddsFormat: { type: String, default: 'decimal' },
     countryCode: { type: String, default: 'KE' },
-    timezone: { type: String, default: 'Africa/Nairobi' },
+    timezone: { type: String, default: 'Africa/Nairobi' }, // NEW
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
@@ -126,8 +133,8 @@ const MatchSchema = new mongoose.Schema({
     away: String,
     isLive: { type: Boolean, default: false },
     status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
-    startTime: { type: Date },
-    timezone: { type: String, default: 'UTC' },
+    startTime: { type: Date }, // Always stored as UTC
+    timezone: { type: String, default: 'UTC' }, // NEW: Origin timezone of the match
     time: String,
     date: String,
     score: String,
@@ -159,8 +166,8 @@ const BetSchema = new mongoose.Schema({
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
-    userTimezone: { type: String, default: 'Africa/Nairobi' },
-    bookingCode: { type: String, unique: true, sparse: true },
+    userTimezone: { type: String, default: 'Africa/Nairobi' }, // NEW: Snapshot at bet time
+    bookingCode: { type: String, unique: true, sparse: true }, // NEW: Shareable code
     legs: [{
         matchId: String,
         match: String,
@@ -168,7 +175,7 @@ const BetSchema = new mongoose.Schema({
         selection: String,
         marketType: { type: String, default: '1x2' },
         odds: Number,
-        startTime: Date,
+        startTime: Date, // UTC
         status: { type: String, default: 'Open' },
         score: String,
         finalScore: String
@@ -340,7 +347,7 @@ app.post('/api/auth/register', authLimiter, async (req, res) => {
         const isKenyan = phone.startsWith('+254') || cleanPhone.startsWith('254') || (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
         const currency = isKenyan ? 'KES' : 'USD';
         const countryCode = isKenyan ? 'KE' : 'US';
-        const timezone = getTimezoneFromCountry(countryCode, phone);
+        const timezone = getTimezoneFromCountry(countryCode, phone); // NEW
 
         const newUser = new User({ username, email, phone, password: hashedPassword, name: username, currency, countryCode, timezone });
         await newUser.save();
@@ -448,27 +455,10 @@ function getSimulatedScore(match) {
     return `${simH}-${simA}`;
 }
 
-// FIXED: Support ?status= and ?all=true so completed matches remain visible when requested
+// UPDATED: Return ALL matches so they don't disappear after resulting
 app.get('/api/matches', async (req, res) => {
     try {
-        const { status, all } = req.query;
-        const now = new Date();
-        let query = {};
-
-        if (all === 'true') {
-            query = {};
-        } else if (status) {
-            query = { status };
-        } else {
-            query = {
-                $or: [
-                    { status: 'upcoming' },
-                    { status: { $exists: false }, startTime: { $gt: now } }
-                ]
-            };
-        }
-
-        const dbMatches = await Match.find(query).sort({ startTime: 1 });
+        const dbMatches = await Match.find().sort({ startTime: -1 });
 
         const formatted = dbMatches.map(m => {
             const obj = m.toObject();
@@ -478,23 +468,10 @@ app.get('/api/matches', async (req, res) => {
         });
 
         res.status(200).json(formatted);
-    } catch (err) {
-        console.error("Matches fetch error:", err);
-        res.status(500).json({ error: "Fetch failed." });
-    }
+    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// NEW: Admin-only endpoint to list ALL matches regardless of status
-app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
-    try {
-        const matches = await Match.find().sort({ startTime: -1 }).limit(500);
-        res.status(200).json(matches);
-    } catch (err) {
-        console.error("Admin matches error:", err);
-        res.status(500).json({ error: "Failed to fetch matches." });
-    }
-});
-
+// UPDATED: Timezone-aware live matches — returns raw UTC times; frontend handles display
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
@@ -620,7 +597,6 @@ app.get('/api/search', async (req, res) => {
 // BETTING
 // ==========================================
 
-// FIXED: Server-side parsing & recalculation to kill NaN
 app.post('/api/bets/place', async (req, res) => {
     try {
         let { userId, stake, totalOdds, potentialReturn, currency, legs, bookingCode } = req.body;
@@ -773,7 +749,6 @@ app.delete('/api/admin/users/:id', verifyAdminToken, async (req, res) => {
     catch (err) { res.status(500).json({ error: "Failed to delete user." }); }
 });
 
-// FIXED: typo statusFilter -> status
 app.get('/api/admin/transactions', verifyAdminToken, async (req, res) => {
     try {
         const statusFilter = req.query.status || 'Pending';
@@ -864,7 +839,6 @@ app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Failed to cancel bet." }); }
 });
 
-// FIXED: Normalizes result from finalScore/score string so settlement never misses admin data
 app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
     try {
         const { score, finalScore, result, isLive, status } = req.body;
@@ -873,7 +847,6 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
         if (score !== undefined) updateData.score = score;
         if (finalScore !== undefined) updateData.finalScore = finalScore;
 
-        // Normalize explicit result
         if (result !== undefined) {
             if (typeof result === 'string' && result.includes('-')) {
                 const [h, a] = result.split('-').map(s => parseInt(s.trim()));
@@ -898,7 +871,6 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
             }
         }
 
-        // Auto-derive result from finalScore / score if no explicit result object provided
         if (!updateData.result && (finalScore || score)) {
             const scoreStr = finalScore || score;
             if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
@@ -947,7 +919,6 @@ setInterval(async () => {
     }
 }, 60000);
 
-// FIXED: Settlement now reads admin result OR parses finalScore/score. If nothing found after 2hrs, random settle.
 setInterval(async () => {
     try {
         const openBets = await Bet.find({ status: { $in: ['Open', 'Partial'] } }).populate('userId');
@@ -971,7 +942,6 @@ setInterval(async () => {
                     continue;
                 }
 
-                // Find match
                 let matchResult = null;
                 try {
                     if (mongoose.Types.ObjectId.isValid(leg.matchId)) {
@@ -985,7 +955,6 @@ setInterval(async () => {
                     console.error("Match lookup error:", e);
                 }
 
-                // Extract result: prefer result object, fallback to finalScore / score string
                 let resultObj = null;
                 if (matchResult) {
                     if (matchResult.result &&
@@ -1012,7 +981,6 @@ setInterval(async () => {
                 const marketType = leg.marketType || '1x2';
 
                 if (resultObj) {
-                    // Admin result exists — settle properly
                     const hG = parseInt(resultObj.homeGoals) || 0;
                     const aG = parseInt(resultObj.awayGoals) || 0;
                     const total = hG + aG;
@@ -1047,7 +1015,6 @@ setInterval(async () => {
                             else if (pick === '2' && aG > hG) isWin = true;
                     }
                 } else {
-                    // No admin result after 2hrs — settle randomly so bets never hang open forever
                     console.warn(`No admin result for match ${leg.matchId || leg.match} after 2hrs. Random settlement.`);
                     isWin = Math.random() > 0.5;
                 }
@@ -1085,7 +1052,6 @@ setInterval(async () => {
                     }).save();
                 }
             } else if (betUpdated) {
-                // Some legs still open, some settled
                 bet.status = 'Partial';
             }
 
