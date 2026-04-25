@@ -31,7 +31,6 @@ app.use(mongoSanitize());
 // 🔓 UNIVERSAL CORS POLICY (Unblocks Mobile Testing & All Domains)
 app.use(cors({
     origin: function (origin, callback) {
-        // This allows absolutely any domain, local IP, or mobile app to connect
         callback(null, true);
     },
     credentials: true
@@ -119,8 +118,8 @@ const MatchSchema = new mongoose.Schema({
     away: String,
     isLive: { type: Boolean, default: false },
     status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
-    startTime: { type: Date }, // Always stored as UTC
-    timezone: { type: String, default: 'UTC' }, // Origin timezone of the match
+    startTime: { type: Date }, 
+    timezone: { type: String, default: 'UTC' }, 
     time: String,
     date: String,
     score: String,
@@ -152,62 +151,35 @@ const BetSchema = new mongoose.Schema({
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
-    userTimezone: { type: String, default: 'Africa/Nairobi' }, // Snapshot at bet time
-    bookingCode: { type: String, unique: true, sparse: true }, // Shareable code
+    userTimezone: { type: String, default: 'Africa/Nairobi' }, 
+    bookingCode: { type: String, unique: true, sparse: true }, 
     legs: [{
-        matchId: String,
-        match: String,
-        pick: String,
-        selection: String,
-        marketType: { type: String, default: '1x2' },
-        odds: Number,
-        startTime: Date, // UTC
-        status: { type: String, default: 'Open' },
-        score: String,
-        finalScore: String
+        matchId: String, match: String, pick: String, selection: String,
+        marketType: { type: String, default: '1x2' }, odds: Number, startTime: Date,
+        status: { type: String, default: 'Open' }, score: String, finalScore: String
     }]
 });
 const Bet = mongoose.model('Bet', BetSchema);
 
 const BookingSlipSchema = new mongoose.Schema({
     code: { type: String, required: true, unique: true, index: true },
-    legs: [{
-        matchId: String,
-        match: String,
-        pick: String,
-        selection: String,
-        marketType: { type: String, default: '1x2' },
-        odds: Number,
-        startTime: Date
-    }],
-    stake: Number,
-    totalOdds: Number,
-    potentialReturn: Number,
-    currency: String,
+    legs: [{ matchId: String, match: String, pick: String, selection: String, marketType: { type: String, default: '1x2' }, odds: Number, startTime: Date }],
+    stake: Number, totalOdds: Number, potentialReturn: Number, currency: String,
     createdAt: { type: Date, default: Date.now, expires: 86400 }
 });
 const BookingSlip = mongoose.model('BookingSlip', BookingSlipSchema);
 
 const TransactionSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    userPhone: String,
-    refId: String,
-    type: { type: String, required: true },
-    method: String,
-    amount: { type: Number, required: true },
-    currency: { type: String, default: 'KES' },
-    status: { type: String, default: 'Pending' },
-    proofUrl: String,
-    date: { type: Date, default: Date.now }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, userPhone: String, refId: String,
+    type: { type: String, required: true }, method: String, amount: { type: Number, required: true },
+    currency: { type: String, default: 'KES' }, status: { type: String, default: 'Pending' },
+    proofUrl: String, date: { type: Date, default: Date.now }
 });
 const Transaction = mongoose.model('Transaction', TransactionSchema);
 
 const NotificationSchema = new mongoose.Schema({
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
-    title: String,
-    message: String,
-    isRead: { type: Boolean, default: false },
-    date: { type: Date, default: Date.now }
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' }, title: String, message: String,
+    isRead: { type: Boolean, default: false }, date: { type: Date, default: Date.now }
 });
 const Notification = mongoose.model('Notification', NotificationSchema);
 
@@ -215,24 +187,21 @@ const JWT_SECRET = process.env.JWT_SECRET || 'fallback_insecure_secret_do_not_us
 
 const verifyAdminToken = (req, res, next) => {
     const token = req.headers['authorization'];
-    if (!token) return res.status(401).json({ error: "Access Denied. No token provided." });
+    if (!token) return res.status(401).json({ error: "Access Denied." });
     try {
         const tokenParts = token.split(" ");
         const actualToken = tokenParts.length === 2 ? tokenParts[1] : tokenParts[0];
         const verified = jwt.verify(actualToken, JWT_SECRET);
-        if (verified.role !== 'admin') return res.status(403).json({ error: "Forbidden. Admin role required." });
+        if (verified.role !== 'admin') return res.status(403).json({ error: "Forbidden." });
         req.admin = verified;
         next();
-    } catch (err) { return res.status(401).json({ error: "Invalid or expired token." }); }
+    } catch (err) { return res.status(401).json({ error: "Invalid token." }); }
 };
 
-const adminLoginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10, message: { error: "Too many login attempts." }});
-app.post('/api/admin/login', adminLoginLimiter, (req, res) => {
+app.post('/api/admin/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }), (req, res) => {
     const { password } = req.body;
-    const adminPass = process.env.ADMIN_PASS || 'admin@26wins';
-    if (password === adminPass) {
-        const token = jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
-        res.status(200).json({ message: "Auth successful", token: token });
+    if (password === (process.env.ADMIN_PASS || 'admin@26wins')) {
+        res.status(200).json({ message: "Auth successful", token: jwt.sign({ role: 'admin' }, JWT_SECRET, { expiresIn: '24h' }) });
     } else { res.status(401).json({ error: "Invalid credentials" }); }
 });
 
@@ -252,29 +221,12 @@ app.post('/api/deposit', async (req, res) => {
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
 
         const reference = "DEP" + Date.now();
-        const payload = {
-            api_key: process.env.MEGAPAY_API_KEY || "MGPYnwLXMM2V",
-            email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com",
-            amount: amount,
-            msisdn: formattedPhone,
-            callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
-            description: "Sportwins Deposit",
-            reference: reference
-        };
+        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYnwLXMM2V", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
 
         try { await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload); }
         catch (mpErr) { return res.status(500).json({ success: false, message: "Payment Gateway failed to initiate STK." }); }
 
-        await Transaction.create({
-            refId: reference,
-            userId: user._id,
-            userPhone: user.phone,
-            type: 'Deposit',
-            method: method || 'M-Pesa',
-            amount: Number(amount),
-            status: 'Pending'
-        });
-
+        await Transaction.create({ refId: reference, userId: user._id, userPhone: user.phone, type: 'Deposit', method: method || 'M-Pesa', amount: Number(amount), status: 'Pending' });
         res.status(200).json({ success: true, message: "STK Push Sent! Check your phone.", newBalance: user.balance, refId: reference });
     } catch (error) { res.status(500).json({ success: false, message: "Payment Gateway Error." }); }
 });
@@ -286,139 +238,86 @@ app.post('/api/megapay/webhook', async (req, res) => {
         if ((data.ResponseCode !== undefined ? data.ResponseCode : data.ResultCode) != 0) return;
         const amount = parseFloat(data.TransactionAmount || data.amount || data.Amount);
         const receipt = data.TransactionReceipt || data.MpesaReceiptNumber;
-        let rawPhone = (data.Msisdn || data.phone || data.PhoneNumber || "").toString();
-
-        const digitsOnly = rawPhone.replace(/\D/g, '');
-        const last9 = digitsOnly.slice(-9);
+        const last9 = (data.Msisdn || data.phone || data.PhoneNumber || "").toString().replace(/\D/g, '').slice(-9);
         if (last9.length < 9) return;
 
         const user = await User.findOne({ phone: { $regex: new RegExp(last9 + '$') } });
-        if (!user) return;
-        const existingTx = await Transaction.findOne({ refId: receipt });
-        if (existingTx) return;
+        if (!user || await Transaction.findOne({ refId: receipt })) return;
 
         user.balance += amount; await user.save();
-
-        await Transaction.create({
-            refId: receipt,
-            userId: user._id,
-            userPhone: user.phone,
-            type: "Deposit",
-            method: "M-Pesa",
-            amount: amount,
-            status: "Success"
-        });
-
+        await Transaction.create({ refId: receipt, userId: user._id, userPhone: user.phone, type: "Deposit", method: "M-Pesa", amount: amount, status: "Success" });
         await new Notification({ userId: user._id, title: "Deposit Successful", message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}` }).save();
         sendTelegramMessage(`💵 <b>SUCCESSFUL DEPOSIT</b>\n📱 User: ${user.phone}\n💰 Amount: KES ${amount}\n🧾 Ref: ${receipt}`);
-    } catch (err) { console.error("Webhook processing error:", err); }
+    } catch (err) {}
 });
 
 // ==========================================
 // AUTH & USERS
 // ==========================================
 
-const authLimiter = rateLimit({ windowMs: 60 * 60 * 1000, max: 15, message: { error: "Too many accounts created from this IP." }});
-
-app.post('/api/auth/register', authLimiter, async (req, res) => {
+app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }), async (req, res) => {
     try {
         const { username, email, phone, password } = req.body;
-
         if (await User.findOne({ username: { $regex: new RegExp('^' + username + '$', 'i') } })) return res.status(400).json({ error: "Username is taken." });
         if (await User.findOne({ email: { $regex: new RegExp('^' + email + '$', 'i') } })) return res.status(400).json({ error: "Email is registered." });
         if (await User.findOne({ phone })) return res.status(400).json({ error: "Phone number is registered." });
 
-        const hashedPassword = await bcrypt.hash(password, 10);
         const cleanPhone = phone.replace(/\D/g, '');
         const isKenyan = phone.startsWith('+254') || cleanPhone.startsWith('254') || (cleanPhone.length === 10 && (cleanPhone.startsWith('07') || cleanPhone.startsWith('01')));
-        const currency = isKenyan ? 'KES' : 'USD';
-        const countryCode = isKenyan ? 'KE' : 'US';
+        const currency = isKenyan ? 'KES' : 'USD'; const countryCode = isKenyan ? 'KE' : 'US';
         const timezone = getTimezoneFromCountry(countryCode, phone);
 
-        const newUser = new User({ username, email, phone, password: hashedPassword, name: username, currency, countryCode, timezone });
+        const newUser = new User({ username, email, phone, password: await bcrypt.hash(password, 10), name: username, currency, countryCode, timezone });
         await newUser.save();
 
-        await new Notification({ userId: newUser._id, title: "Welcome to SportyWins!", message: "Your account is ready." }).save();
+        await new Notification({ userId: newUser._id, title: "Welcome!", message: "Your account is ready." }).save();
         sendTelegramMessage(`🎉 <b>NEW USER</b>\n👤 ${username}\n📞 ${phone}`);
 
         res.status(201).json({ message: "User created", user: { _id: newUser._id, username: newUser.username, name: newUser.name, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode, timezone: newUser.timezone, oddsFormat: newUser.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
-    } catch (err) { res.status(500).json({ error: "Server error during registration." }); }
+    } catch (err) { res.status(500).json({ error: "Server error." }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
     try {
         const { identifier, password } = req.body;
         const digitsOnly = identifier.replace(/\D/g, '');
-        let phoneQuery = identifier;
-        if (digitsOnly.length >= 9) phoneQuery = { $regex: new RegExp(digitsOnly.slice(-9) + '$') };
-
+        const phoneQuery = digitsOnly.length >= 9 ? { $regex: new RegExp(digitsOnly.slice(-9) + '$') } : identifier;
         const user = await User.findOne({ $or: [{ email: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { username: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { phone: phoneQuery }, { phone: identifier }] });
-        if (!user) return res.status(404).json({ error: "User not registered." });
-
-        const isMatch = await bcrypt.compare(password, user.password);
-        if (!isMatch) return res.status(401).json({ error: "Wrong password." });
-
+        
+        if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Invalid credentials." });
         res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, timezone: user.timezone, oddsFormat: user.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
-    } catch (err) { res.status(500).json({ error: "Server error during login." }); }
+    } catch (err) { res.status(500).json({ error: "Server error." }); }
 });
 
-app.get('/api/user/:id/profile', async (req, res) => {
-    try {
-        const user = await User.findById(req.params.id).select('-password');
-        if (!user) return res.status(404).json({ error: "User not found" });
-        const userPayload = user.toObject(); userPayload.cryptoAddresses = getCryptoAddresses();
-        res.status(200).json(userPayload);
-    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
-});
-
-app.get('/api/user/:id/notifications', async (req, res) => {
-    try {
-        const notifs = await Notification.find({ $or: [{ userId: req.params.id }, { userId: null }] }).sort({ date: -1 }).limit(20);
-        res.status(200).json(notifs);
-    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
-});
+app.get('/api/user/:id/profile', async (req, res) => { try { const user = await User.findById(req.params.id).select('-password'); if (!user) return res.status(404).send(); const userPayload = user.toObject(); userPayload.cryptoAddresses = getCryptoAddresses(); res.status(200).json(userPayload); } catch (err) { res.status(500).send(); } });
+app.get('/api/user/:id/notifications', async (req, res) => { try { res.status(200).json(await Notification.find({ $or: [{ userId: req.params.id }, { userId: null }] }).sort({ date: -1 }).limit(20)); } catch (err) { res.status(500).send(); } });
 
 // ==========================================
-// WALLET WITHDRAWALS & MANUAL DEPOSITS
+// WALLET
 // ==========================================
 
 app.post('/api/wallet/deposit/manual', async (req, res) => {
     try {
         const { userId, amount, currency, method, proofSubmitted } = req.body;
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ error: "User not found." });
-
-        const proofStatus = proofSubmitted ? 'Proof Submitted' : 'Pending';
-        const txn = new Transaction({ userId, type: 'Deposit', method, amount, currency, status: 'Pending', proofUrl: proofStatus });
-        await txn.save();
-
+        const user = await User.findById(userId); if (!user) return res.status(404).send();
+        await Transaction.create({ userId, type: 'Deposit', method, amount, currency, status: 'Pending', proofUrl: proofSubmitted ? 'Proof Submitted' : 'Pending' });
         sendTelegramMessage(`⏳ <b>MANUAL DEPOSIT</b>\n👤 User: ${user.username}\n💳 Method: ${method}\n💰 Amount: ${amount} ${currency}`);
-        res.status(200).json({ message: "Deposit requested successfully.", balance: user.balance });
-    } catch (err) { res.status(500).json({ error: "Deposit failed." }); }
+        res.status(200).json({ message: "Deposit requested.", balance: user.balance });
+    } catch (err) { res.status(500).send(); }
 });
 
 app.post('/api/wallet/withdraw', async (req, res) => {
     try {
         const { userId, amount, currency, accountDetails } = req.body;
-        const user = await User.findById(userId);
-        if (!user) return res.status(404).json({ error: "User not found." });
-        if (user.balance < amount) return res.status(400).json({ error: "Insufficient funds." });
-
+        const user = await User.findById(userId); if (!user || user.balance < amount) return res.status(400).send();
         user.balance -= parseFloat(amount); await user.save();
-        const txn = new Transaction({ userId, type: 'Withdrawal', amount, currency, status: 'Pending' });
-        await txn.save();
-
+        await Transaction.create({ userId, type: 'Withdrawal', amount, currency, status: 'Pending' });
         sendTelegramMessage(`💸 <b>WITHDRAWAL</b>\n👤 User: ${user.username}\n💳 Dest: ${accountDetails}\n💰 Amount: ${amount} ${currency}`);
-        res.status(200).json({ message: "Withdrawal requested successfully", balance: user.balance });
-    } catch (err) { res.status(500).json({ error: "Withdrawal failed." }); }
+        res.status(200).json({ message: "Withdrawal requested", balance: user.balance });
+    } catch (err) { res.status(500).send(); }
 });
 
-app.get('/api/wallet/transactions/:userId', async (req, res) => {
-    try {
-        const txns = await Transaction.find({ userId: req.params.userId }).sort({ date: -1 });
-        res.status(200).json(txns);
-    } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
-});
+app.get('/api/wallet/transactions/:userId', async (req, res) => { try { res.status(200).json(await Transaction.find({ userId: req.params.userId }).sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
 
 // ==========================================
 // MATCHES & ODDS API
@@ -426,7 +325,7 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
 
-// 🔥 DETERMINISTIC SCORE GENERATOR
+// 🔥 DETERMINISTIC SCORE GENERATOR (Only runs for Admin Live Games)
 function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
     const now = new Date().getTime();
@@ -434,7 +333,7 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     
     if (elapsed < 0) return null; 
 
-    const duration = 2 * 60 * 60 * 1000; // 2 hours
+    const duration = 2 * 60 * 60 * 1000; 
     const progress = Math.min(elapsed / duration, 1);
 
     if (adminResultObj && adminResultObj.homeGoals !== undefined) {
@@ -452,6 +351,7 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
+// 🛡️ FRONTEND FEED: Only shows Upcoming and Live matches (Admin) to regular users.
 app.get('/api/matches', async (req, res) => {
     try {
         const dbMatches = await Match.find({
@@ -472,12 +372,17 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// 🛡️ LIVE MATCHES & PARLAY API INTEGRATION
+// 🛡️ HYBRID FEED: Fetches ONLY upcoming games from API, and live games from Admin DB.
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
+        const nextWeek = new Date();
+        nextWeek.setDate(now.getDate() + 7);
 
-        // MASSIVELY EXPANDED ARRAY to pull 200+ games globally
+        // Fetch API games strictly from NOW (no past games, no live games)
+        const fromDate = now.toISOString().split('.')[0] + 'Z';
+        const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
+
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a',
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_england_championship',
@@ -490,16 +395,13 @@ app.get('/api/live-matches', async (req, res) => {
 
         let allApiMatches = [];
 
-        // By removing commenceTime parameters, the API naturally returns what is actively playing NOW and UPCOMING!
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,us&markets=h2h,spreads`);
+                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
-            } catch (e) {
-                // Silently skip sports that are out of season or missing quota
-            }
+            } catch (e) {}
         }));
 
         let formattedMatches = allApiMatches.map((match) => {
@@ -516,16 +418,6 @@ app.get('/api/live-matches', async (req, res) => {
                 if (drawOutcome) drawOdds = drawOutcome.price;
             }
 
-            const matchDate = new Date(match.commence_time);
-            const elapsed = now.getTime() - matchDate.getTime();
-            const twoHours = 2 * 60 * 60 * 1000;
-
-            // Hide from API feed exactly 2 hours after kickoff
-            if (elapsed >= twoHours) return null;
-
-            const isLiveNow = elapsed >= 0 && elapsed < twoHours;
-            const liveScore = isLiveNow ? getDeterministicScore(match.id, match.commence_time, null) : null;
-
             let mappedSport = 'football';
             if (match.sport_key.includes('basketball')) mappedSport = 'basketball';
             if (match.sport_key.includes('tennis')) mappedSport = 'tennis';
@@ -539,7 +431,7 @@ app.get('/api/live-matches', async (req, res) => {
                 if (drawOdds < 2.5) drawOdds = 3.10; 
             }
 
-            let gradeScore = isLiveNow ? 200 : 0;
+            let gradeScore = 0;
             if (mappedSport === 'football') gradeScore += 50;
             if (match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
 
@@ -551,18 +443,18 @@ app.get('/api/live-matches', async (req, res) => {
                 country: mappedSport === 'basketball' || mappedSport === 'rugby' || mappedSport === 'baseball' ? 'us' : 'gb-eng',
                 home: match.home_team,
                 away: match.away_team,
-                isLive: isLiveNow,
+                isLive: false, // API games are strictly UPCOMING
                 isFeatured: gradeScore > 50,
                 startTime: match.commence_time,
-                score: liveScore,
+                score: null,
                 odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
                 gradeScore: gradeScore,
-                status: isLiveNow ? 'live' : 'upcoming',
+                status: 'upcoming',
                 result: null,
                 finalScore: null
             };
-        }).filter(m => m !== null); 
+        }); 
 
         let dbMatches = [];
         try {
@@ -589,6 +481,7 @@ app.get('/api/live-matches', async (req, res) => {
         } catch (e) {}
 
         const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
+        
         res.status(200).json(combined.slice(0, 500));
     } catch (err) {
         console.error("Live Matches Error:", err);
@@ -626,7 +519,6 @@ app.post('/api/bets/place', async (req, res) => {
             return res.status(400).json({ error: "Invalid total odds." });
         }
 
-        // Always calculate server-side — ignore whatever frontend sent
         potentialReturn = parseFloat((stake * totalOdds).toFixed(2));
 
         if (!Array.isArray(legs) || legs.length === 0) {
