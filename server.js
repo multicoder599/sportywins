@@ -28,12 +28,9 @@ app.use((req, res, next) => {
 
 app.use(mongoSanitize());
 
-
-
 // 🔓 UNIVERSAL CORS POLICY (Unblocks Mobile Testing & All Domains)
 app.use(cors({
     origin: function (origin, callback) {
-        // This allows absolutely any domain, local IP, or mobile app to connect
         callback(null, true);
     },
     credentials: true
@@ -82,7 +79,6 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
         FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
         BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
     };
-    // Phone prefix fallback
     const p = String(phone).replace(/\D/g, '');
     if (p.startsWith('254')) return 'Africa/Nairobi';
     if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
@@ -429,22 +425,32 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
 
-function getSimulatedScore(match) {
-    if (!match.result || match.status !== 'live' || !match.startTime) {
-        return match.score || '0-0';
+// 🔥 DETERMINISTIC SCORE GENERATOR
+function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
+    const start = new Date(startTimeStr).getTime();
+    const now = new Date().getTime();
+    const elapsed = now - start;
+    
+    if (elapsed < 0) return null; 
+
+    const duration = 2 * 60 * 60 * 1000; // 2 hours
+    const progress = Math.min(elapsed / duration, 1);
+
+    if (adminResultObj && adminResultObj.homeGoals !== undefined) {
+        return `${Math.floor(adminResultObj.homeGoals * progress)}-${Math.floor(adminResultObj.awayGoals * progress)}`;
     }
-    const now = new Date();
-    const elapsed = now - new Date(match.startTime);
-    const duration = 2 * 60 * 60 * 1000;
-    const progress = Math.min(Math.max(elapsed / duration, 0), 1);
-    const finalH = match.result.homeGoals || 0;
-    const finalA = match.result.awayGoals || 0;
-    const simH = Math.floor(finalH * progress);
-    const simA = Math.floor(finalA * progress);
-    return `${simH}-${simA}`;
+
+    let seed = 0;
+    for (let i = 0; i < matchId.length; i++) {
+        seed += matchId.charCodeAt(i);
+    }
+    
+    const maxHome = seed % 4; 
+    const maxAway = (seed * 3) % 4;
+    
+    return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
-// 🛡️ FRONTEND FEED: Only shows Upcoming and Live matches to regular users. Completed matches are hidden from the feed.
 app.get('/api/matches', async (req, res) => {
     try {
         const dbMatches = await Match.find({
@@ -455,6 +461,9 @@ app.get('/api/matches', async (req, res) => {
             const obj = m.toObject();
             obj.startTime = m.startTime ? m.startTime.toISOString() : null;
             obj.markets = m.markets || {};
+            if (obj.status === 'live' && obj.startTime) {
+                obj.score = getDeterministicScore(obj._id.toString(), obj.startTime, obj.result);
+            }
             return obj;
         });
 
@@ -469,47 +478,49 @@ app.get('/api/live-matches', async (req, res) => {
         const nextWeek = new Date();
         nextWeek.setDate(now.getDate() + 7);
 
-        const fromDate = now.toISOString().split('.')[0] + 'Z';
+        // 🕰️ TIME FIX: Reach back 3 hours to fetch CURRENTLY LIVE games
+        const threeHoursAgo = new Date(now.getTime() - (3 * 60 * 60 * 1000));
+        const fromDate = threeHoursAgo.toISOString().split('.')[0] + 'Z';
         const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
 
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a',
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_england_championship',
-            'basketball_nba', 'basketball_euroleague',
+            'soccer_england_league_1', 'soccer_england_league_2', 'soccer_netherlands_eredivisie', 
+            'soccer_portugal_primeira_liga', 'soccer_turkey_super_lig', 'soccer_brazil_campeonato', 'soccer_usa_mls',
+            'basketball_nba', 'basketball_euroleague', 'basketball_ncaab',
             'tennis_atp', 'tennis_wta', 'icehockey_nhl',
-            'mma_mixed_martial_arts', 'americanfootball_nfl'
+            'mma_mixed_martial_arts', 'americanfootball_nfl', 'baseball_mlb'
         ];
 
         let allApiMatches = [];
 
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                // Fetching from the new Parlay API
-                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=us,uk&markets=h2h`);
+                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
             } catch (e) {
-                // API Error caught silently (likely out of free requests)
+                console.warn(`Parlay API skipped ${sportKey} (might be out of season).`);
             }
         }));
 
-        // 🛡️ API FALLBACK: If the Parlay API key has run out of quota (0 games returned), generate highly realistic fallback matches so the UI doesn't look broken.
         if (allApiMatches.length === 0) {
             allApiMatches = [
                 {
                     id: 'sim_1', sport_key: 'soccer_epl', sport_title: 'Premier League', home_team: 'Manchester City', away_team: 'Liverpool',
-                    commence_time: new Date(now.getTime() + 3600000).toISOString(), // 1 hour from now
+                    commence_time: new Date(now.getTime() + 3600000).toISOString(),
                     bookmakers: [{ markets: [{ outcomes: [{ name: 'Manchester City', price: 1.95 }, { name: 'Draw', price: 3.50 }, { name: 'Liverpool', price: 3.80 }] }] }]
                 },
                 {
                     id: 'sim_2', sport_key: 'soccer_spain_la_liga', sport_title: 'La Liga', home_team: 'Real Madrid', away_team: 'Atletico Madrid',
-                    commence_time: new Date(now.getTime() + 7200000).toISOString(), // 2 hours from now
+                    commence_time: new Date(now.getTime() + 7200000).toISOString(),
                     bookmakers: [{ markets: [{ outcomes: [{ name: 'Real Madrid', price: 1.80 }, { name: 'Draw', price: 3.60 }, { name: 'Atletico Madrid', price: 4.20 }] }] }]
                 },
                 {
                     id: 'sim_3', sport_key: 'soccer_italy_serie_a', sport_title: 'Serie A', home_team: 'Juventus', away_team: 'AC Milan',
-                    commence_time: new Date(now.getTime() + 10800000).toISOString(), // 3 hours from now
+                    commence_time: new Date(now.getTime() + 10800000).toISOString(),
                     bookmakers: [{ markets: [{ outcomes: [{ name: 'Juventus', price: 2.20 }, { name: 'Draw', price: 3.20 }, { name: 'AC Milan', price: 3.10 }] }] }]
                 }
             ];
@@ -517,19 +528,27 @@ app.get('/api/live-matches', async (req, res) => {
 
         let formattedMatches = allApiMatches.map((match) => {
             const market = match.bookmakers[0]?.markets[0];
-            let oddsArray = [2.10, 3.10, 2.80];
+            let homeOdds = 2.10, drawOdds = null, awayOdds = 2.80;
 
             if (market && market.outcomes) {
-                oddsArray = [
-                    market.outcomes.find(o => o.name === match.home_team)?.price || 2.10,
-                    market.outcomes.find(o => o.name === 'Draw')?.price || null,
-                    market.outcomes.find(o => o.name === match.away_team)?.price || 2.80
-                ];
+                const homeOutcome = market.outcomes.find(o => o.name === match.home_team);
+                const awayOutcome = market.outcomes.find(o => o.name === match.away_team);
+                const drawOutcome = market.outcomes.find(o => o.name === 'Draw' || (o.name !== match.home_team && o.name !== match.away_team));
+
+                if (homeOutcome) homeOdds = homeOutcome.price;
+                if (awayOutcome) awayOdds = awayOutcome.price;
+                if (drawOutcome) drawOdds = drawOutcome.price;
             }
 
             const matchDate = new Date(match.commence_time);
-            const isLiveNow = matchDate <= now;
-            const mockScore = isLiveNow ? `${Math.floor(Math.random() * 3)}-${Math.floor(Math.random() * 3)}` : null;
+            const elapsed = now.getTime() - matchDate.getTime();
+            const twoHours = 2 * 60 * 60 * 1000;
+
+            // Hide from API feed exactly 2 hours after kickoff
+            if (elapsed >= twoHours) return null;
+
+            const isLiveNow = elapsed >= 0 && elapsed < twoHours;
+            const liveScore = isLiveNow ? getDeterministicScore(match.id, match.commence_time, null) : null;
 
             let mappedSport = 'football';
             if (match.sport_key.includes('basketball')) mappedSport = 'basketball';
@@ -537,6 +556,12 @@ app.get('/api/live-matches', async (req, res) => {
             if (match.sport_key.includes('mma')) mappedSport = 'mma';
             if (match.sport_key.includes('icehockey')) mappedSport = 'icehockey';
             if (match.sport_key.includes('americanfootball')) mappedSport = 'rugby';
+            if (match.sport_key.includes('baseball')) mappedSport = 'baseball';
+
+            if (mappedSport === 'football' && !drawOdds) {
+                drawOdds = parseFloat(((homeOdds + awayOdds) / 1.5).toFixed(2));
+                if (drawOdds < 2.5) drawOdds = 3.10; 
+            }
 
             let gradeScore = isLiveNow ? 200 : 0;
             if (mappedSport === 'football') gradeScore += 50;
@@ -547,25 +572,25 @@ app.get('/api/live-matches', async (req, res) => {
                 sport: mappedSport,
                 region: 'Global',
                 league: match.sport_title,
-                country: mappedSport === 'basketball' || mappedSport === 'rugby' ? 'us' : 'gb-eng',
+                country: mappedSport === 'basketball' || mappedSport === 'rugby' || mappedSport === 'baseball' ? 'us' : 'gb-eng',
                 home: match.home_team,
                 away: match.away_team,
                 isLive: isLiveNow,
                 isFeatured: gradeScore > 50,
                 startTime: match.commence_time,
-                score: mockScore,
-                odds: oddsArray,
+                score: liveScore,
+                odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
                 gradeScore: gradeScore,
                 status: isLiveNow ? 'live' : 'upcoming',
                 result: null,
                 finalScore: null
             };
-        });
+        }).filter(m => m !== null); 
 
         let dbMatches = [];
         try {
-            dbMatches = (await Match.find({ status: 'live' })).map(m => ({
+            dbMatches = (await Match.find({ status: { $in: ['upcoming', 'live'] } })).map(m => ({
                 id: m._id.toString(),
                 sport: m.sport || 'football',
                 region: 'Custom',
@@ -573,10 +598,10 @@ app.get('/api/live-matches', async (req, res) => {
                 country: m.country || 'gb-eng',
                 home: m.home,
                 away: m.away,
-                isLive: true,
+                isLive: m.status === 'live',
                 isFeatured: true,
                 startTime: m.startTime ? m.startTime.toISOString() : null,
-                score: getSimulatedScore(m),
+                score: m.status === 'live' ? getDeterministicScore(m._id.toString(), m.startTime, m.result) : null,
                 finalScore: m.finalScore || null,
                 odds: m.odds || [2.1, 3.1, 2.8],
                 marketCount: m.markets ? (Object.keys(m.markets).length * 5 + 20) : 50,
@@ -588,7 +613,8 @@ app.get('/api/live-matches', async (req, res) => {
         } catch (e) {}
 
         const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
-        res.status(200).json(combined.slice(0, 300));
+        
+        res.status(200).json(combined.slice(0, 500));
     } catch (err) {
         console.error("Live Matches Error:", err);
         res.status(500).json({ error: "Could not fetch live matches." });
@@ -600,6 +626,7 @@ app.get('/api/search', async (req, res) => {
         const query = req.query.q;
         if (!query) return res.status(200).json([]);
         const dbResults = await Match.find({
+            status: { $in: ['upcoming', 'live'] },
             $or: [{ home: { $regex: query, $options: 'i' } }, { away: { $regex: query, $options: 'i' } }, { league: { $regex: query, $options: 'i' } }]
         });
         res.status(200).json(dbResults);
@@ -794,7 +821,7 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
 
-// 🛡️ ADMIN FEED: Fetches ALL matches (Upcoming, Live, and Completed) so you can fix results for any game.
+// 🛡️ ADMIN FEED: Fetches ALL matches (Upcoming, Live, and Completed)
 app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matches = await Match.find().sort({ startTime: -1 }).limit(500);
