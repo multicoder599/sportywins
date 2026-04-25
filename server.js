@@ -221,7 +221,7 @@ app.post('/api/deposit', async (req, res) => {
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
 
         const reference = "DEP" + Date.now();
-        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYnwLXMM2V", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
+        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYDgkkstpA", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
 
         try { await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload); }
         catch (mpErr) { return res.status(500).json({ success: false, message: "Payment Gateway failed to initiate STK." }); }
