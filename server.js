@@ -325,6 +325,11 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => { try { res.stat
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
 
+// 🔥 CACHE VARIABLES (Saves your API Quota!)
+let cachedApiGames = [];
+let lastApiFetchTime = 0;
+const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
+
 // 🔥 DETERMINISTIC SCORE GENERATOR (Only runs for Admin Live Games)
 function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
@@ -372,14 +377,58 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// 🛡️ HYBRID FEED: Fetches ONLY UPCOMING games from API, and LIVE games from Admin DB.
+// 🛡️ HYBRID FEED: Fetches UPCOMING from Cache/API, LIVE from Admin DB
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
         
+        // ==========================================
+        // 1. GET ADMIN DB GAMES (These are always live/real-time)
+        // ==========================================
+        let dbMatches = [];
+        try {
+            dbMatches = (await Match.find({ status: { $in: ['upcoming', 'live'] } })).map(m => ({
+                id: m._id.toString(),
+                sport: m.sport || 'football',
+                region: 'Custom',
+                league: m.league || 'League',
+                country: m.country || 'gb-eng',
+                home: m.home,
+                away: m.away,
+                isLive: m.status === 'live',
+                isFeatured: true,
+                startTime: m.startTime ? m.startTime.toISOString() : null,
+                score: m.status === 'live' ? getDeterministicScore(m._id.toString(), m.startTime, m.result) : null,
+                finalScore: m.finalScore || null,
+                odds: m.odds || [2.1, 3.1, 2.8],
+                marketCount: m.markets ? (Object.keys(m.markets).length * 5 + 20) : 50,
+                gradeScore: 1000,
+                detailedMarkets: m.markets || {},
+                status: m.status,
+                result: m.result || null
+            }));
+        } catch (e) {}
+
+        // ==========================================
+        // 2. CHECK THE CACHE (Saves API Credits!)
+        // ==========================================
+        if (now.getTime() - lastApiFetchTime < CACHE_DURATION_MS && cachedApiGames.length > 0) {
+            // Cache is valid! Filter out any games that have kicked off since the cache was saved
+            cachedApiGames = cachedApiGames.filter(match => {
+                const matchDate = new Date(match.startTime);
+                return (now.getTime() - matchDate.getTime()) < 0; 
+            });
+
+            const combined = [...dbMatches, ...cachedApiGames].sort((a, b) => b.gradeScore - a.gradeScore);
+            return res.status(200).json(combined.slice(0, 500));
+        }
+
+        // ==========================================
+        // 3. FETCH FROM API (Only runs once every 30 minutes)
+        // ==========================================
         const tomorrow = new Date();
         tomorrow.setDate(now.getDate() + 1);
-        tomorrow.setHours(0, 0, 0, 0); // Start fetching strictly from midnight tomorrow
+        tomorrow.setHours(0, 0, 0, 0); 
 
         const nextWeek = new Date();
         nextWeek.setDate(now.getDate() + 7);
@@ -414,15 +463,13 @@ app.get('/api/live-matches', async (req, res) => {
             if (match.commence_time && match.commence_time.includes('19:00:00Z')) {
                 let seed = 0;
                 for (let i = 0; i < match.id.length; i++) seed += match.id.charCodeAt(i);
-                
                 const hourOffset = seed % 6; 
                 const minuteOffset = (seed % 2) === 0 ? 30 : 0;
                 matchDate.setUTCHours(12 + hourOffset, minuteOffset, 0, 0); 
             }
 
             const elapsed = now.getTime() - matchDate.getTime();
-
-            if (elapsed >= 0) return null;
+            if (elapsed >= 0) return null; // API games must be upcoming
 
             const market = match.bookmakers[0]?.markets[0];
             let homeOdds = 2.10, drawOdds = null, awayOdds = 2.80;
@@ -493,33 +540,15 @@ app.get('/api/live-matches', async (req, res) => {
             };
         }).filter(m => m !== null); 
 
-        let dbMatches = [];
-        try {
-            dbMatches = (await Match.find({ status: { $in: ['upcoming', 'live'] } })).map(m => ({
-                id: m._id.toString(),
-                sport: m.sport || 'football',
-                region: 'Custom',
-                league: m.league || 'League',
-                country: m.country || 'gb-eng',
-                home: m.home,
-                away: m.away,
-                isLive: m.status === 'live',
-                isFeatured: true,
-                startTime: m.startTime ? m.startTime.toISOString() : null,
-                score: m.status === 'live' ? getDeterministicScore(m._id.toString(), m.startTime, m.result) : null,
-                finalScore: m.finalScore || null,
-                odds: m.odds || [2.1, 3.1, 2.8],
-                marketCount: m.markets ? (Object.keys(m.markets).length * 5 + 20) : 50,
-                gradeScore: 1000,
-                detailedMarkets: m.markets || {},
-                status: m.status,
-                result: m.result || null
-            }));
-        } catch (e) {}
+        // ==========================================
+        // 4. UPDATE CACHE AND RESPOND
+        // ==========================================
+        cachedApiGames = formattedMatches;
+        lastApiFetchTime = now.getTime();
 
-        const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
-        
+        const combined = [...dbMatches, ...cachedApiGames].sort((a, b) => b.gradeScore - a.gradeScore);
         res.status(200).json(combined.slice(0, 500));
+
     } catch (err) {
         console.error("Live Matches Error:", err);
         res.status(500).json({ error: "Could not fetch live matches." });
