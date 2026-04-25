@@ -438,7 +438,7 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => {
 // MATCHES & ODDS API
 // ==========================================
 
-const ODDS_API_KEY = process.env.ODDS_API_KEY || 'd374910cb48a45ed2f6004cfd617f4e4';
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '2681c5eb4ab7810ab4809f5a80790ace';
 
 function getSimulatedScore(match) {
     if (!match.result || match.status !== 'live' || !match.startTime) {
@@ -780,7 +780,16 @@ app.put('/api/admin/transactions/:id/:action', verifyAdminToken, async (req, res
         await txn.save(); res.status(200).json({ message: `Transaction ${action}d.` });
     } catch (err) { res.status(500).json({ error: "Failed to process transaction." }); }
 });
-
+// FETCH ALL MATCHES FOR ADMIN PANEL
+app.get('/api/admin/matches', verifyAdminToken, async (req, res) => {
+    try {
+        const matches = await Match.find().sort({ startTime: -1 }).limit(500);
+        res.status(200).json(matches);
+    } catch (err) {
+        console.error("Admin matches error:", err);
+        res.status(500).json({ error: "Failed to fetch matches." });
+    }
+});
 app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
     try {
         const matchData = req.body;
