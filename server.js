@@ -80,7 +80,6 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
         FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
         BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
     };
-    // Phone prefix fallback
     const p = String(phone).replace(/\D/g, '');
     if (p.startsWith('254')) return 'Africa/Nairobi';
     if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
@@ -477,14 +476,8 @@ app.get('/api/matches', async (req, res) => {
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
-        const nextWeek = new Date();
-        nextWeek.setDate(now.getDate() + 7);
 
-        // 🕰️ TIME FIX: Reach back 3 hours to fetch CURRENTLY LIVE games
-        const threeHoursAgo = new Date(now.getTime() - (3 * 60 * 60 * 1000));
-        const fromDate = threeHoursAgo.toISOString().split('.')[0] + 'Z';
-        const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
-
+        // MASSIVELY EXPANDED ARRAY to pull 200+ games globally
         const sportsToFetch = [
             'soccer_epl', 'soccer_uefa_champs_league', 'soccer_uefa_europa_league', 'soccer_italy_serie_a',
             'soccer_spain_la_liga', 'soccer_germany_bundesliga', 'soccer_france_ligue_one', 'soccer_england_championship',
@@ -497,14 +490,15 @@ app.get('/api/live-matches', async (req, res) => {
 
         let allApiMatches = [];
 
+        // By removing commenceTime parameters, the API naturally returns what is actively playing NOW and UPCOMING!
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
+                const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,us&markets=h2h,spreads`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
                 }
             } catch (e) {
-                console.warn(`Parlay API skipped ${sportKey} (might be out of season).`);
+                // Silently skip sports that are out of season or missing quota
             }
         }));
 
@@ -595,7 +589,6 @@ app.get('/api/live-matches', async (req, res) => {
         } catch (e) {}
 
         const combined = [...dbMatches, ...formattedMatches].sort((a, b) => b.gradeScore - a.gradeScore);
-        
         res.status(200).json(combined.slice(0, 500));
     } catch (err) {
         console.error("Live Matches Error:", err);
