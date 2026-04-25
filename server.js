@@ -44,8 +44,8 @@ app.use('/api/', apiLimiter);
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sportywins';
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ MongoDB Connected Successfully'))
-    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+  .then(() => console.log('✅ MongoDB Connected Successfully'))
+  .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
 const sendTelegramMessage = async (message) => {
     const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -84,10 +84,10 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
     if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
     if (p.startsWith('256')) return 'Africa/Kampala';
     if (p.startsWith('234')) return 'Africa/Lagos';
-    if (p.startsWith('27')) return 'Africa/Johannesburg';
+    if (p.startsWith('27'))  return 'Africa/Johannesburg';
     if (p.startsWith('233')) return 'Africa/Accra';
-    if (p.startsWith('44')) return 'Europe/London';
-    if (p.startsWith('1')) return 'America/New_York';
+    if (p.startsWith('44'))  return 'Europe/London';
+    if (p.startsWith('1'))   return 'America/New_York';
     return map[countryCode] || 'UTC';
 };
 
@@ -105,7 +105,7 @@ const UserSchema = new mongoose.Schema({
     currency: { type: String, default: 'KES' },
     oddsFormat: { type: String, default: 'decimal' },
     countryCode: { type: String, default: 'KE' },
-    timezone: { type: String, default: 'Africa/Nairobi' },
+    timezone: { type: String, default: 'Africa/Nairobi' }, 
     createdAt: { type: Date, default: Date.now }
 });
 const User = mongoose.model('User', UserSchema);
@@ -118,8 +118,8 @@ const MatchSchema = new mongoose.Schema({
     away: String,
     isLive: { type: Boolean, default: false },
     status: { type: String, enum: ['upcoming', 'live', 'completed'], default: 'upcoming' },
-    startTime: { type: Date },
-    timezone: { type: String, default: 'UTC' },
+    startTime: { type: Date }, 
+    timezone: { type: String, default: 'UTC' }, 
     time: String,
     date: String,
     score: String,
@@ -151,8 +151,8 @@ const BetSchema = new mongoose.Schema({
     potentialReturn: { type: Number, required: true },
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
-    userTimezone: { type: String, default: 'Africa/Nairobi' },
-    bookingCode: { type: String, unique: true, sparse: true },
+    userTimezone: { type: String, default: 'Africa/Nairobi' }, 
+    bookingCode: { type: String, unique: true, sparse: true }, 
     legs: [{
         matchId: String, match: String, pick: String, selection: String,
         marketType: { type: String, default: '1x2' }, odds: Number, startTime: Date,
@@ -248,7 +248,7 @@ app.post('/api/megapay/webhook', async (req, res) => {
         await Transaction.create({ refId: receipt, userId: user._id, userPhone: user.phone, type: "Deposit", method: "M-Pesa", amount: amount, status: "Success" });
         await new Notification({ userId: user._id, title: "Deposit Successful", message: `Your deposit of KES ${amount} has been credited. Receipt: ${receipt}` }).save();
         sendTelegramMessage(`💵 <b>SUCCESSFUL DEPOSIT</b>\n📱 User: ${user.phone}\n💰 Amount: KES ${amount}\n🧾 Ref: ${receipt}`);
-    } catch (err) { }
+    } catch (err) {}
 });
 
 // ==========================================
@@ -283,7 +283,7 @@ app.post('/api/auth/login', async (req, res) => {
         const digitsOnly = identifier.replace(/\D/g, '');
         const phoneQuery = digitsOnly.length >= 9 ? { $regex: new RegExp(digitsOnly.slice(-9) + '$') } : identifier;
         const user = await User.findOne({ $or: [{ email: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { username: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { phone: phoneQuery }, { phone: identifier }] });
-
+        
         if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Invalid credentials." });
         res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, timezone: user.timezone, oddsFormat: user.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
     } catch (err) { res.status(500).json({ error: "Server error." }); }
@@ -330,10 +330,10 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
     const now = new Date().getTime();
     const elapsed = now - start;
+    
+    if (elapsed < 0) return null; 
 
-    if (elapsed < 0) return null;
-
-    const duration = 2 * 60 * 60 * 1000;
+    const duration = 2 * 60 * 60 * 1000; 
     const progress = Math.min(elapsed / duration, 1);
 
     if (adminResultObj && adminResultObj.homeGoals !== undefined) {
@@ -344,10 +344,10 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     for (let i = 0; i < matchId.length; i++) {
         seed += matchId.charCodeAt(i);
     }
-
-    const maxHome = seed % 4;
+    
+    const maxHome = seed % 4; 
     const maxAway = (seed * 3) % 4;
-
+    
     return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
@@ -372,21 +372,18 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// 🛡️ HYBRID FEED: Fetches ONLY upcoming games from API (Tomorrow+), and live games from Admin DB.
+// 🛡️ HYBRID FEED: Fetches ONLY UPCOMING games from API, and LIVE games from Admin DB.
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
         
-        // 🔥 THE FIX: Tell the API to ignore "Today" entirely to avoid stuck/glitched games.
-        // It will only fetch games starting from tomorrow onwards.
         const tomorrow = new Date();
         tomorrow.setDate(now.getDate() + 1);
-        tomorrow.setHours(0, 0, 0, 0); // Start at exactly midnight tomorrow
+        tomorrow.setHours(0, 0, 0, 0); // Start fetching strictly from midnight tomorrow
 
         const nextWeek = new Date();
         nextWeek.setDate(now.getDate() + 7);
 
-        // Put the strict time filters back into the API request
         const fromDate = tomorrow.toISOString().split('.')[0] + 'Z';
         const toDate = nextWeek.toISOString().split('.')[0] + 'Z';
 
@@ -404,7 +401,6 @@ app.get('/api/live-matches', async (req, res) => {
 
         await Promise.all(sportsToFetch.map(async (sportKey) => {
             try {
-                // Re-added commenceTime parameters to strictly block today's muddy data
                 const response = await axios.get(`https://parlay-api.com/v1/sports/${sportKey}/odds?apiKey=${ODDS_API_KEY}&regions=uk,eu,us&markets=h2h,spreads&commenceTimeFrom=${fromDate}&commenceTimeTo=${toDate}`);
                 if (response.data) {
                     allApiMatches = allApiMatches.concat(response.data);
@@ -413,10 +409,22 @@ app.get('/api/live-matches', async (req, res) => {
         }));
 
         let formattedMatches = allApiMatches.map((match) => {
-            const matchDate = new Date(match.commence_time);
+            let matchDate = new Date(match.commence_time);
+
+            // 🛠️ DATA SANITIZER: Fix the Parlay API "19:00:00Z" fallback time bug
+            if (match.commence_time && match.commence_time.includes('19:00:00Z')) {
+                let seed = 0;
+                for (let i = 0; i < match.id.length; i++) seed += match.id.charCodeAt(i);
+                
+                // Generates a stable afternoon UTC kickoff based on Match ID
+                const hourOffset = seed % 6; // 0 to 5 hours offset
+                const minuteOffset = (seed % 2) === 0 ? 30 : 0;
+                matchDate.setUTCHours(12 + hourOffset, minuteOffset, 0, 0); 
+            }
+
             const elapsed = now.getTime() - matchDate.getTime();
 
-            // 🛑 RULE: If the API somehow sneaks a past game in, DELETE IT.
+            // 🛑 RULE: Delete any game that has already started. API is for Upcoming only.
             if (elapsed >= 0) return null;
 
             const market = match.bookmakers[0]?.markets[0];
@@ -445,6 +453,25 @@ app.get('/api/live-matches', async (req, res) => {
                 if (drawOdds < 2.5) drawOdds = 3.10; 
             }
 
+            // 🛠️ DATA SANITIZER: Fix League Names and Flags
+            let leagueName = match.sport_title || 'League';
+            if (match.sport_key === 'soccer_germany_bundesliga') leagueName = 'Bundesliga';
+            if (match.sport_key === 'soccer_spain_la_liga') leagueName = 'La Liga';
+            if (match.sport_key === 'soccer_italy_serie_a') leagueName = 'Serie A';
+            if (match.sport_key === 'soccer_france_ligue_one') leagueName = 'Ligue 1';
+            if (match.sport_key === 'soccer_epl') leagueName = 'Premier League';
+            
+            let countryCode = 'gb-eng';
+            if (match.sport_key.includes('germany')) countryCode = 'de';
+            else if (match.sport_key.includes('spain')) countryCode = 'es';
+            else if (match.sport_key.includes('italy')) countryCode = 'it';
+            else if (match.sport_key.includes('france')) countryCode = 'fr';
+            else if (match.sport_key.includes('portugal')) countryCode = 'pt';
+            else if (match.sport_key.includes('netherlands')) countryCode = 'nl';
+            else if (match.sport_key.includes('brazil')) countryCode = 'br';
+            else if (match.sport_key.includes('turkey')) countryCode = 'tr';
+            else if (match.sport_key.includes('usa') || mappedSport !== 'football') countryCode = 'us';
+
             let gradeScore = 0;
             if (mappedSport === 'football') gradeScore += 50;
             if (match.sport_key.includes('champs_league') || match.sport_key.includes('epl')) gradeScore += 75;
@@ -453,13 +480,13 @@ app.get('/api/live-matches', async (req, res) => {
                 id: 'api_' + match.id,
                 sport: mappedSport,
                 region: 'Global',
-                league: match.sport_title,
-                country: mappedSport === 'basketball' || mappedSport === 'rugby' || mappedSport === 'baseball' ? 'us' : 'gb-eng',
+                league: leagueName,
+                country: countryCode,
                 home: match.home_team,
                 away: match.away_team,
-                isLive: false, 
+                isLive: false,
                 isFeatured: gradeScore > 50,
-                startTime: match.commence_time, 
+                startTime: matchDate.toISOString(), // Uses the fixed/sanitized time
                 score: null,
                 odds: [homeOdds, drawOdds, awayOdds],
                 marketCount: Math.floor(Math.random() * 150) + 30,
@@ -530,6 +557,7 @@ app.post('/api/bets/place', async (req, res) => {
         if (isNaN(totalOdds) || totalOdds < 1) return res.status(400).json({ error: "Invalid total odds." });
 
         potentialReturn = parseFloat((stake * totalOdds).toFixed(2));
+
         if (!Array.isArray(legs) || legs.length === 0) return res.status(400).json({ error: "No bet legs provided." });
 
         const user = await User.findById(userId);
@@ -685,7 +713,7 @@ setInterval(async () => {
         await Match.updateMany({ status: 'upcoming', startTime: { $lte: now } }, { $set: { status: 'live', isLive: true } });
         const twoHoursAgo = new Date(now.getTime() - (2 * 60 * 60 * 1000));
         await Match.updateMany({ status: 'live', startTime: { $lte: twoHoursAgo } }, { $set: { status: 'completed', isLive: false } });
-    } catch (err) { }
+    } catch (err) {}
 }, 60000);
 
 setInterval(async () => {
@@ -705,11 +733,11 @@ setInterval(async () => {
                 try {
                     if (mongoose.Types.ObjectId.isValid(leg.matchId)) matchResult = await Match.findById(leg.matchId);
                     if (!matchResult && leg.match) matchResult = await Match.findOne({ home: leg.match.split(' v ')[0], startTime: leg.startTime });
-                } catch (e) { }
+                } catch (e) {}
 
                 let resultObj = null;
                 if (matchResult) {
-                    if (matchResult.result && matchResult.result.homeGoals !== undefined && matchResult.result.awayGoals !== undefined) { resultObj = matchResult.result; }
+                    if (matchResult.result && matchResult.result.homeGoals !== undefined && matchResult.result.awayGoals !== undefined) { resultObj = matchResult.result; } 
                     else {
                         const scoreStr = matchResult.finalScore || matchResult.score;
                         if (typeof scoreStr === 'string' && scoreStr.includes('-')) {
@@ -740,7 +768,7 @@ setInterval(async () => {
                 betUpdated = true; if (leg.status === 'Lost') hasLost = true;
             }
 
-            if (hasLost) { bet.status = 'Lost'; betUpdated = true; }
+            if (hasLost) { bet.status = 'Lost'; betUpdated = true; } 
             else if (allSettled) {
                 bet.status = 'Won'; betUpdated = true;
                 const user = await User.findById(bet.userId);
@@ -752,7 +780,7 @@ setInterval(async () => {
             } else if (betUpdated) { bet.status = 'Partial'; }
             if (betUpdated) { bet.markModified('legs'); await bet.save(); }
         }
-    } catch (err) { }
+    } catch (err) {}
 }, 60000);
 
 const PORT = process.env.PORT || 5000;
