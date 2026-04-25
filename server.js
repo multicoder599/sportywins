@@ -31,6 +31,7 @@ app.use(mongoSanitize());
 // 🔓 UNIVERSAL CORS POLICY (Unblocks Mobile Testing & All Domains)
 app.use(cors({
     origin: function (origin, callback) {
+        // This allows absolutely any domain, local IP, or mobile app to connect
         callback(null, true);
     },
     credentials: true
@@ -79,6 +80,7 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
         FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
         BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
     };
+    // Phone prefix fallback
     const p = String(phone).replace(/\D/g, '');
     if (p.startsWith('254')) return 'Africa/Nairobi';
     if (p.startsWith('255')) return 'Africa/Dar_es_Salaam';
@@ -505,26 +507,6 @@ app.get('/api/live-matches', async (req, res) => {
                 console.warn(`Parlay API skipped ${sportKey} (might be out of season).`);
             }
         }));
-
-        if (allApiMatches.length === 0) {
-            allApiMatches = [
-                {
-                    id: 'sim_1', sport_key: 'soccer_epl', sport_title: 'Premier League', home_team: 'Manchester City', away_team: 'Liverpool',
-                    commence_time: new Date(now.getTime() + 3600000).toISOString(),
-                    bookmakers: [{ markets: [{ outcomes: [{ name: 'Manchester City', price: 1.95 }, { name: 'Draw', price: 3.50 }, { name: 'Liverpool', price: 3.80 }] }] }]
-                },
-                {
-                    id: 'sim_2', sport_key: 'soccer_spain_la_liga', sport_title: 'La Liga', home_team: 'Real Madrid', away_team: 'Atletico Madrid',
-                    commence_time: new Date(now.getTime() + 7200000).toISOString(),
-                    bookmakers: [{ markets: [{ outcomes: [{ name: 'Real Madrid', price: 1.80 }, { name: 'Draw', price: 3.60 }, { name: 'Atletico Madrid', price: 4.20 }] }] }]
-                },
-                {
-                    id: 'sim_3', sport_key: 'soccer_italy_serie_a', sport_title: 'Serie A', home_team: 'Juventus', away_team: 'AC Milan',
-                    commence_time: new Date(now.getTime() + 10800000).toISOString(),
-                    bookmakers: [{ markets: [{ outcomes: [{ name: 'Juventus', price: 2.20 }, { name: 'Draw', price: 3.20 }, { name: 'AC Milan', price: 3.10 }] }] }]
-                }
-            ];
-        }
 
         let formattedMatches = allApiMatches.map((match) => {
             const market = match.bookmakers[0]?.markets[0];
