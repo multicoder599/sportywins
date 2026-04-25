@@ -221,7 +221,7 @@ app.post('/api/deposit', async (req, res) => {
         if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
 
         const reference = "DEP" + Date.now();
-        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYDgkkstpA", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
+        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYnwLXMM2V", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
 
         try { await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload); }
         catch (mpErr) { return res.status(500).json({ success: false, message: "Payment Gateway failed to initiate STK." }); }
@@ -325,20 +325,43 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => { try { res.stat
 
 const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
 
-// 🔥 CACHE VARIABLES (Saves your API Quota!)
+// 🔥 CACHE VARIABLES
 let cachedApiGames = [];
 let lastApiFetchTime = 0;
-const CACHE_DURATION_MS = 30 * 60 * 1000; // 30 Minutes
+const CACHE_DURATION_MS = 30 * 60 * 1000; 
 
-// 🔥 DETERMINISTIC SCORE GENERATOR (Only runs for Admin Live Games)
+// 🔥 FOOTBALL TIMELINE CALCULATOR
+function getMatchTimeStr(startTimeStr) {
+    if (!startTimeStr) return "";
+    const elapsedMs = new Date().getTime() - new Date(startTimeStr).getTime();
+    const elapsedMins = Math.floor(elapsedMs / 60000);
+
+    if (elapsedMins < 0) return "Upcoming";
+    
+    // 1st Half: 0 - 45 mins
+    if (elapsedMins <= 45) return `${elapsedMins}'`;
+    // 1st Half Stoppage: 45 - 50 mins
+    if (elapsedMins > 45 && elapsedMins <= 50) return `45+${elapsedMins - 45}'`;
+    // Half Time Break: 50 - 65 mins
+    if (elapsedMins > 50 && elapsedMins <= 65) return "HT";
+    // 2nd Half: 65 - 110 mins (represents 46' to 90')
+    if (elapsedMins > 65 && elapsedMins <= 110) return `${45 + (elapsedMins - 65)}'`;
+    // 2nd Half Stoppage: 110 - 116 mins (represents 90' to 96')
+    if (elapsedMins > 110 && elapsedMins <= 116) return `90+${elapsedMins - 110}'`;
+    // Settlement Buffer
+    if (elapsedMins > 116 && elapsedMins < 120) return "Settling...";
+    
+    return "FT";
+}
+
 function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     const start = new Date(startTimeStr).getTime();
     const now = new Date().getTime();
     const elapsed = now - start;
-    
     if (elapsed < 0) return null; 
 
-    const duration = 2 * 60 * 60 * 1000; 
+    // Spread goals over 116 minutes of active real-world playing time
+    const duration = 116 * 60 * 1000; 
     const progress = Math.min(elapsed / duration, 1);
 
     if (adminResultObj && adminResultObj.homeGoals !== undefined) {
@@ -346,17 +369,13 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     }
 
     let seed = 0;
-    for (let i = 0; i < matchId.length; i++) {
-        seed += matchId.charCodeAt(i);
-    }
-    
+    for (let i = 0; i < matchId.length; i++) { seed += matchId.charCodeAt(i); }
     const maxHome = seed % 4; 
     const maxAway = (seed * 3) % 4;
     
     return `${Math.floor(maxHome * progress)}-${Math.floor(maxAway * progress)}`;
 }
 
-// 🛡️ FRONTEND FEED: Only shows Upcoming matches to regular users.
 app.get('/api/matches', async (req, res) => {
     try {
         const dbMatches = await Match.find({
@@ -369,6 +388,7 @@ app.get('/api/matches', async (req, res) => {
             obj.markets = m.markets || {};
             if (obj.status === 'live' && obj.startTime) {
                 obj.score = getDeterministicScore(obj._id.toString(), obj.startTime, obj.result);
+                obj.time = getMatchTimeStr(obj.startTime);
             }
             return obj;
         });
@@ -377,14 +397,10 @@ app.get('/api/matches', async (req, res) => {
     } catch (err) { res.status(500).json({ error: "Fetch failed." }); }
 });
 
-// 🛡️ HYBRID FEED: Fetches UPCOMING from Cache/API, LIVE from Admin DB
 app.get('/api/live-matches', async (req, res) => {
     try {
         const now = new Date();
         
-        // ==========================================
-        // 1. GET ADMIN DB GAMES (These are always live/real-time)
-        // ==========================================
         let dbMatches = [];
         try {
             dbMatches = (await Match.find({ status: { $in: ['upcoming', 'live'] } })).map(m => ({
@@ -398,6 +414,7 @@ app.get('/api/live-matches', async (req, res) => {
                 isLive: m.status === 'live',
                 isFeatured: true,
                 startTime: m.startTime ? m.startTime.toISOString() : null,
+                time: m.status === 'live' ? getMatchTimeStr(m.startTime) : null,
                 score: m.status === 'live' ? getDeterministicScore(m._id.toString(), m.startTime, m.result) : null,
                 finalScore: m.finalScore || null,
                 odds: m.odds || [2.1, 3.1, 2.8],
@@ -409,23 +426,15 @@ app.get('/api/live-matches', async (req, res) => {
             }));
         } catch (e) {}
 
-        // ==========================================
-        // 2. CHECK THE CACHE (Saves API Credits!)
-        // ==========================================
         if (now.getTime() - lastApiFetchTime < CACHE_DURATION_MS && cachedApiGames.length > 0) {
-            // Cache is valid! Filter out any games that have kicked off since the cache was saved
             cachedApiGames = cachedApiGames.filter(match => {
                 const matchDate = new Date(match.startTime);
                 return (now.getTime() - matchDate.getTime()) < 0; 
             });
-
             const combined = [...dbMatches, ...cachedApiGames].sort((a, b) => b.gradeScore - a.gradeScore);
             return res.status(200).json(combined.slice(0, 500));
         }
 
-        // ==========================================
-        // 3. FETCH FROM API (Only runs once every 30 minutes)
-        // ==========================================
         const tomorrow = new Date();
         tomorrow.setDate(now.getDate() + 1);
         tomorrow.setHours(0, 0, 0, 0); 
@@ -469,7 +478,7 @@ app.get('/api/live-matches', async (req, res) => {
             }
 
             const elapsed = now.getTime() - matchDate.getTime();
-            if (elapsed >= 0) return null; // API games must be upcoming
+            if (elapsed >= 0) return null; 
 
             const market = match.bookmakers[0]?.markets[0];
             let homeOdds = 2.10, drawOdds = null, awayOdds = 2.80;
@@ -540,9 +549,6 @@ app.get('/api/live-matches', async (req, res) => {
             };
         }).filter(m => m !== null); 
 
-        // ==========================================
-        // 4. UPDATE CACHE AND RESPOND
-        // ==========================================
         cachedApiGames = formattedMatches;
         lastApiFetchTime = now.getTime();
 
@@ -721,7 +727,6 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
             }
         }
 
-        // 🛑 NEW LOGIC: FORCE STATUS BASED ON STRICT TIMELINE, IGNORE ADMIN PANEL'S 'COMPLETED' STATUS
         const match = await Match.findById(req.params.id);
         if (!match) return res.status(404).json({ error: "Match not found." });
 
@@ -731,15 +736,12 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
         const twoHours = 2 * 60 * 60 * 1000;
 
         if (elapsed < 0) {
-            // Game hasn't started yet. Lock it to upcoming.
             updateData.status = 'upcoming';
             updateData.isLive = false;
         } else if (elapsed >= 0 && elapsed < twoHours) {
-            // Game is currently in its 2-hour playing window. Lock it to Live.
             updateData.status = 'live';
             updateData.isLive = true;
         } else {
-            // Game is actually over. Allow the admin panel's status.
             if (isLive !== undefined) updateData.isLive = isLive;
             if (status !== undefined) updateData.status = status;
         }
@@ -773,7 +775,6 @@ setInterval(async () => {
             for (let leg of bet.legs) {
                 if (leg.status !== 'Open') { if (leg.status === 'Lost') hasLost = true; continue; }
                 
-                // Bets strictly settle 2 hours after kickoff
                 const settlementTime = new Date(new Date(leg.startTime).getTime() + (2 * 60 * 60 * 1000));
                 if (now < settlementTime) { allSettled = false; continue; }
 
