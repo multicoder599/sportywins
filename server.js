@@ -58,12 +58,20 @@ const sendTelegramMessage = async (message) => {
     } catch (err) { console.error("❌ Telegram notification failed:", err.message); }
 };
 
-const getCryptoAddresses = () => ({
-    Bitcoin: process.env.BTC_ADDRESS || 'bc1q_configure_in_env',
-    USDT: process.env.USDT_ADDRESS || '0x_configure_in_env',
-    USDC: process.env.USDC_ADDRESS || '0x_configure_in_env',
-    Solana: process.env.SOLANA_ADDRESS || 'sol_configure_in_env',
-    Litecoin: process.env.LTC_ADDRESS || 'ltc_configure_in_env'
+// 🔥 NEW: COMBINED PAYMENT METHODS CONFIGURATION
+const getPaymentMethods = () => ({
+    crypto: {
+        Bitcoin: process.env.BTC_ADDRESS || 'bc1q_configure_in_env',
+        USDT: process.env.USDT_ADDRESS || '0x_configure_in_env',
+        USDC: process.env.USDC_ADDRESS || '0x_configure_in_env',
+        Solana: process.env.SOLANA_ADDRESS || 'sol_configure_in_env',
+        Litecoin: process.env.LTC_ADDRESS || 'ltc_configure_in_env'
+    },
+    mobileMoney: {
+        AirtelMoney: process.env.AIRTEL_MONEY_DETAILS || 'Configure in Env',
+        MTN: process.env.MTN_DETAILS || 'Configure in Env',
+        Tigo: process.env.TIGO_DETAILS || 'Configure in Env'
+    }
 });
 
 // ==========================================
@@ -77,7 +85,8 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
         GB: 'Europe/London', US: 'America/New_York', CA: 'America/Toronto',
         AU: 'Australia/Sydney', IN: 'Asia/Kolkata', DE: 'Europe/Berlin',
         FR: 'Europe/Paris', ES: 'Europe/Madrid', IT: 'Europe/Rome',
-        BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai'
+        BR: 'America/Sao_Paulo', MX: 'America/Mexico_City', AE: 'Asia/Dubai',
+        ZM: 'Africa/Lusaka', ZW: 'Africa/Harare'
     };
     const p = String(phone).replace(/\D/g, '');
     if (p.startsWith('254')) return 'Africa/Nairobi';
@@ -86,6 +95,8 @@ const getTimezoneFromCountry = (countryCode, phone = '') => {
     if (p.startsWith('234')) return 'Africa/Lagos';
     if (p.startsWith('27'))  return 'Africa/Johannesburg';
     if (p.startsWith('233')) return 'Africa/Accra';
+    if (p.startsWith('260')) return 'Africa/Lusaka';
+    if (p.startsWith('263')) return 'Africa/Harare';
     if (p.startsWith('44'))  return 'Europe/London';
     if (p.startsWith('1'))   return 'America/New_York';
     return map[countryCode] || 'UTC';
@@ -273,7 +284,7 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
         await new Notification({ userId: newUser._id, title: "Welcome!", message: "Your account is ready." }).save();
         sendTelegramMessage(`🎉 <b>NEW USER</b>\n👤 ${username}\n📞 ${phone}`);
 
-        res.status(201).json({ message: "User created", user: { _id: newUser._id, username: newUser.username, name: newUser.name, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode, timezone: newUser.timezone, oddsFormat: newUser.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
+        res.status(201).json({ message: "User created", user: { _id: newUser._id, username: newUser.username, name: newUser.name, email: newUser.email, phone: newUser.phone, balance: newUser.balance, currency: newUser.currency, countryCode: newUser.countryCode, timezone: newUser.timezone, oddsFormat: newUser.oddsFormat, paymentMethods: getPaymentMethods() } });
     } catch (err) { res.status(500).json({ error: "Server error." }); }
 });
 
@@ -285,11 +296,20 @@ app.post('/api/auth/login', async (req, res) => {
         const user = await User.findOne({ $or: [{ email: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { username: { $regex: new RegExp('^' + identifier + '$', 'i') } }, { phone: phoneQuery }, { phone: identifier }] });
         
         if (!user || !(await bcrypt.compare(password, user.password))) return res.status(401).json({ error: "Invalid credentials." });
-        res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, timezone: user.timezone, oddsFormat: user.oddsFormat, cryptoAddresses: getCryptoAddresses() } });
+        res.status(200).json({ message: "Login successful", user: { _id: user._id, username: user.username, name: user.name, email: user.email, phone: user.phone, balance: user.balance, currency: user.currency, countryCode: user.countryCode, timezone: user.timezone, oddsFormat: user.oddsFormat, paymentMethods: getPaymentMethods() } });
     } catch (err) { res.status(500).json({ error: "Server error." }); }
 });
 
-app.get('/api/user/:id/profile', async (req, res) => { try { const user = await User.findById(req.params.id).select('-password'); if (!user) return res.status(404).send(); const userPayload = user.toObject(); userPayload.cryptoAddresses = getCryptoAddresses(); res.status(200).json(userPayload); } catch (err) { res.status(500).send(); } });
+app.get('/api/user/:id/profile', async (req, res) => { 
+    try { 
+        const user = await User.findById(req.params.id).select('-password'); 
+        if (!user) return res.status(404).send(); 
+        const userPayload = user.toObject(); 
+        userPayload.paymentMethods = getPaymentMethods(); 
+        res.status(200).json(userPayload); 
+    } catch (err) { res.status(500).send(); } 
+});
+
 app.get('/api/user/:id/notifications', async (req, res) => { try { res.status(200).json(await Notification.find({ $or: [{ userId: req.params.id }, { userId: null }] }).sort({ date: -1 }).limit(20)); } catch (err) { res.status(500).send(); } });
 
 // ==========================================
@@ -306,14 +326,23 @@ app.post('/api/wallet/deposit/manual', async (req, res) => {
     } catch (err) { res.status(500).send(); }
 });
 
+// 🔥 NEW FULL-BALANCE WITHDRAWAL ROUTE
 app.post('/api/wallet/withdraw', async (req, res) => {
     try {
-        const { userId, amount, currency, accountDetails } = req.body;
-        const user = await User.findById(userId); if (!user || user.balance < amount) return res.status(400).send();
-        user.balance -= parseFloat(amount); await user.save();
-        await Transaction.create({ userId, type: 'Withdrawal', amount, currency, status: 'Pending' });
-        sendTelegramMessage(`💸 <b>WITHDRAWAL</b>\n👤 User: ${user.username}\n💳 Dest: ${accountDetails}\n💰 Amount: ${amount} ${currency}`);
-        res.status(200).json({ message: "Withdrawal requested", balance: user.balance });
+        // Backend actively ignores 'amount' sent from the frontend to strictly enforce full sweep
+        const { userId, currency, accountDetails } = req.body;
+        
+        const user = await User.findById(userId); 
+        if (!user || user.balance <= 0) return res.status(400).json({ error: "Insufficient funds." });
+        
+        const withdrawAmount = user.balance; // Force 100% of balance
+        user.balance = 0; // Empty the wallet
+        await user.save();
+        
+        await Transaction.create({ userId, type: 'Withdrawal', amount: withdrawAmount, currency, status: 'Pending' });
+        sendTelegramMessage(`💸 <b>FULL WITHDRAWAL REQUESTED</b>\n👤 User: ${user.username}\n💳 Dest: ${accountDetails}\n💰 Amount: ${withdrawAmount} ${currency}`);
+        
+        res.status(200).json({ message: "Full withdrawal requested", balance: user.balance });
     } catch (err) { res.status(500).send(); }
 });
 
@@ -790,7 +819,6 @@ setInterval(async () => {
                 }
 
                 let isWin = false; 
-                // Extract strings and make them uppercase for easy matching
                 const pickStr = (leg.pick || '').toString().trim().toUpperCase();
                 const selStr = (leg.selection || '').toString().trim().toUpperCase();
 
@@ -800,11 +828,9 @@ setInterval(async () => {
                     const total = hG + aG;
                     const bothScored = (hG > 0 && aG > 0);
 
-                    // 1. Correct Score Check (Matches things like "0-3")
                     if (pickStr.match(/^\d+-\d+$/)) {
                         isWin = (pickStr === `${hG}-${aG}`);
                     }
-                    // 2. Over / Under Check (Matches "Over 2.5", "Under 1.5", etc)
                     else if (pickStr.includes('OVER') || pickStr.includes('UNDER') || selStr.includes('OVER') || selStr.includes('UNDER')) {
                         const matchNum = pickStr.match(/\d+(\.\d+)?/) || selStr.match(/\d+(\.\d+)?/);
                         if (matchNum) {
@@ -813,28 +839,24 @@ setInterval(async () => {
                             if ((pickStr.includes('UNDER') || selStr.includes('UNDER')) && total < line) isWin = true;
                         }
                     }
-                    // 3. Double Chance Check
                     else if (pickStr === '1X' || selStr.includes('1X')) { isWin = hG >= aG; }
                     else if (pickStr === 'X2' || selStr.includes('X2')) { isWin = aG >= hG; }
                     else if (pickStr === '12' || selStr.includes('12')) { isWin = hG !== aG; }
                     
-                    // 4. BTTS (Both Teams to Score) Check
                     else if (selStr.includes('BTTS') || pickStr === 'YES' || pickStr === 'NO') {
                         if ((pickStr === 'YES' || selStr.includes('YES')) && bothScored) isWin = true;
                         if ((pickStr === 'NO' || selStr.includes('NO')) && !bothScored) isWin = true;
                     }
-                    // 5. Odd / Even Check
                     else if (pickStr === 'ODD' || selStr === 'ODD') { isWin = (total % 2 !== 0); }
                     else if (pickStr === 'EVEN' || selStr === 'EVEN') { isWin = (total % 2 === 0); }
                     
-                    // 6. Default: Match Winner (1X2) Check
                     else {
                         if ((pickStr === '1' || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
                         else if ((pickStr === 'X' || pickStr === 'DRAW' || selStr.includes('DRAW')) && hG === aG) isWin = true;
                         else if ((pickStr === '2' || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
                     }
                 } else {
-                    isWin = Math.random() > 0.5; // Random fallback if no admin result was ever posted
+                    isWin = Math.random() > 0.5; 
                 }
 
                 leg.status = isWin ? 'Won' : 'Lost';
