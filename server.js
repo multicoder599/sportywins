@@ -211,24 +211,101 @@ app.post('/api/admin/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }), (
 
 app.post('/api/deposit', async (req, res) => {
     try {
-        const { userPhone, amount, method } = req.body;
-        if (amount < 10) return res.status(400).json({ success: false, message: 'Minimum deposit is 10.' });
+        // Parse amount early so all comparisons are numeric
+        const { userPhone, method } = req.body;
+        const amount = parseFloat(req.body.amount);
+
+        if (!userPhone) return res.status(400).json({ success: false, message: 'Phone number is required.' });
+        if (isNaN(amount) || amount < 10) return res.status(400).json({ success: false, message: 'Minimum deposit is KES 10.' });
+
         const user = await User.findOne({ phone: userPhone });
-        if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+        if (!user) return res.status(404).json({ success: false, message: 'No account found with this phone number.' });
 
+        // Phone normalisation — handles +254, 254, 07, 7 prefixes
         let formattedPhone = userPhone.replace(/\D/g, '');
-        if (formattedPhone.startsWith('0')) formattedPhone = '254' + formattedPhone.substring(1);
-        if (formattedPhone.startsWith('7') || formattedPhone.startsWith('1')) formattedPhone = '254' + formattedPhone;
+        if (formattedPhone.startsWith('0'))            formattedPhone = '254' + formattedPhone.slice(1);
+        else if (/^[71]/.test(formattedPhone))         formattedPhone = '254' + formattedPhone;
+        else if (!formattedPhone.startsWith('254'))    formattedPhone = '254' + formattedPhone;
 
-        const reference = "DEP" + Date.now();
-        const payload = { api_key: process.env.MEGAPAY_API_KEY || "MGPYDgkkstpA", email: process.env.MEGAPAY_EMAIL || "kanyingiwaitara@gmail.com", amount: amount, msisdn: formattedPhone, callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`, description: "Sportwins Deposit", reference: reference };
+        if (formattedPhone.length !== 12) {
+            return res.status(400).json({ success: false, message: 'Invalid phone number format. Use 07XXXXXXXX or +254XXXXXXXXX.' });
+        }
 
-        try { await axios.post('https://megapay.co.ke/backend/v1/initiatestk', payload); }
-        catch (mpErr) { return res.status(500).json({ success: false, message: "Payment Gateway failed to initiate STK." }); }
+        const reference = 'DEP' + Date.now();
 
-        await Transaction.create({ refId: reference, userId: user._id, userPhone: user.phone, type: 'Deposit', method: method || 'M-Pesa', amount: Number(amount), status: 'Pending' });
-        res.status(200).json({ success: true, message: "STK Push Sent! Check your phone.", newBalance: user.balance, refId: reference });
-    } catch (error) { res.status(500).json({ success: false, message: "Payment Gateway Error." }); }
+        const payload = {
+            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYDgkkstpA',
+            email:        process.env.MEGAPAY_EMAIL    || 'kanyingiwaitara@gmail.com',
+            amount:       amount,
+            msisdn:       formattedPhone,
+            callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
+            description:  'Sportwins Deposit',
+            reference:    reference
+        };
+
+        try {
+            const mpRes = await axios.post(
+                'https://megapay.co.ke/backend/v1/initiatestk',
+                payload,
+                {
+                    headers: { 'Content-Type': 'application/json' },  // FIX 1: required by MegaPay
+                    timeout: 15000                                      // FIX 2: 15s timeout
+                }
+            );
+
+            // FIX 3: Check the response body — MegaPay can return 200 with a failure payload
+            const mpData = mpRes.data;
+            console.log('MegaPay response:', JSON.stringify(mpData));
+
+            if (mpData && (mpData.status === false || mpData.success === false || mpData.ResponseCode === '1')) {
+                return res.status(400).json({
+                    success: false,
+                    message: mpData.errorMessage || mpData.message || 'MegaPay rejected the request.',
+                    debug: process.env.NODE_ENV !== 'production' ? mpData : undefined
+                });
+            }
+
+        } catch (mpErr) {
+            // FIX 4: Log the actual error so you can see what MegaPay is saying
+            console.error('MegaPay STK error:', {
+                status:  mpErr.response?.status,
+                data:    mpErr.response?.data,
+                message: mpErr.message
+            });
+
+            return res.status(502).json({
+                success: false,
+                message: 'Payment gateway failed to send STK push.',
+                // Only expose details outside production
+                debug: process.env.NODE_ENV !== 'production'
+                    ? (mpErr.response?.data || mpErr.message)
+                    : undefined
+            });
+        }
+
+        // Record as Pending — only reached if MegaPay accepted the request
+        await Transaction.create({
+            refId:     reference,
+            userId:    user._id,
+            userPhone: user.phone,
+            type:      'Deposit',
+            method:    method || 'M-Pesa',
+            amount:    amount,
+            currency:  user.currency || 'KES',
+            status:    'Pending'
+        });
+
+        res.status(200).json({
+            success:    true,
+            message:    'STK Push sent! Check your phone and enter your M-Pesa PIN.',
+            newBalance: user.balance,
+            refId:      reference
+        });
+
+    } catch (error) {
+        console.error('Deposit endpoint error:', error);
+        res.status(500).json({ success: false, message: 'Internal server error during deposit.' });
+    }
 });
 
 app.post('/api/megapay/webhook', async (req, res) => {
