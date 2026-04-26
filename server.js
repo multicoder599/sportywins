@@ -338,17 +338,11 @@ function getMatchTimeStr(startTimeStr) {
 
     if (elapsedMins < 0) return "Upcoming";
     
-    // 1st Half: 0 - 45 mins
     if (elapsedMins <= 45) return `${elapsedMins}'`;
-    // 1st Half Stoppage: 45 - 50 mins
     if (elapsedMins > 45 && elapsedMins <= 50) return `45+${elapsedMins - 45}'`;
-    // Half Time Break: 50 - 65 mins
     if (elapsedMins > 50 && elapsedMins <= 65) return "HT";
-    // 2nd Half: 65 - 110 mins (represents 46' to 90')
     if (elapsedMins > 65 && elapsedMins <= 110) return `${45 + (elapsedMins - 65)}'`;
-    // 2nd Half Stoppage: 110 - 116 mins (represents 90' to 96')
     if (elapsedMins > 110 && elapsedMins <= 116) return `90+${elapsedMins - 110}'`;
-    // Settlement Buffer
     if (elapsedMins > 116 && elapsedMins < 120) return "Settling...";
     
     return "FT";
@@ -360,7 +354,6 @@ function getDeterministicScore(matchId, startTimeStr, adminResultObj) {
     const elapsed = now - start;
     if (elapsed < 0) return null; 
 
-    // Spread goals over 116 minutes of active real-world playing time
     const duration = 116 * 60 * 1000; 
     const progress = Math.min(elapsed / duration, 1);
 
@@ -752,7 +745,7 @@ app.put('/api/admin/matches/:id/result', verifyAdminToken, async (req, res) => {
 });
 
 // ==========================================
-// BACKGROUND WORKERS
+// BACKGROUND WORKERS (SMART SETTLEMENT ENGINE)
 // ==========================================
 
 setInterval(async () => {
@@ -796,20 +789,52 @@ setInterval(async () => {
                     }
                 }
 
-                let isWin = false; const pick = (leg.pick || leg.selection || '').toString().trim(); const marketType = leg.marketType || '1x2';
+                let isWin = false; 
+                // Extract strings and make them uppercase for easy matching
+                const pickStr = (leg.pick || '').toString().trim().toUpperCase();
+                const selStr = (leg.selection || '').toString().trim().toUpperCase();
 
                 if (resultObj) {
-                    const hG = parseInt(resultObj.homeGoals) || 0; const aG = parseInt(resultObj.awayGoals) || 0; const total = hG + aG;
-                    switch (marketType) {
-                        case '1x2': if (pick === '1' && hG > aG) isWin = true; else if (pick === 'X' && hG === aG) isWin = true; else if (pick === '2' && aG > hG) isWin = true; break;
-                        case 'correctScore': if (pick === `${hG}-${aG}`) isWin = true; break;
-                        case 'overUnder': const line = parseFloat(pick.replace(/[^0-9.]/g, '')); if (pick.includes('Over') && total > line) isWin = true; if (pick.includes('Under') && total < line) isWin = true; break;
-                        case 'btts': const bothScored = hG > 0 && aG > 0; if (pick === 'Yes' && bothScored) isWin = true; if (pick === 'No' && !bothScored) isWin = true; break;
-                        case 'doubleChance': if (pick === '1X' && hG >= aG) isWin = true; if (pick === 'X2' && aG >= hG) isWin = true; if (pick === '12' && hG !== aG) isWin = true; break;
-                        default: if (pick === '1' && hG > aG) isWin = true; else if (pick === 'X' && hG === aG) isWin = true; else if (pick === '2' && aG > hG) isWin = true;
+                    const hG = parseInt(resultObj.homeGoals) || 0; 
+                    const aG = parseInt(resultObj.awayGoals) || 0; 
+                    const total = hG + aG;
+                    const bothScored = (hG > 0 && aG > 0);
+
+                    // 1. Correct Score Check (Matches things like "0-3")
+                    if (pickStr.match(/^\d+-\d+$/)) {
+                        isWin = (pickStr === `${hG}-${aG}`);
+                    }
+                    // 2. Over / Under Check (Matches "Over 2.5", "Under 1.5", etc)
+                    else if (pickStr.includes('OVER') || pickStr.includes('UNDER') || selStr.includes('OVER') || selStr.includes('UNDER')) {
+                        const matchNum = pickStr.match(/\d+(\.\d+)?/) || selStr.match(/\d+(\.\d+)?/);
+                        if (matchNum) {
+                            const line = parseFloat(matchNum[0]);
+                            if ((pickStr.includes('OVER') || selStr.includes('OVER')) && total > line) isWin = true;
+                            if ((pickStr.includes('UNDER') || selStr.includes('UNDER')) && total < line) isWin = true;
+                        }
+                    }
+                    // 3. Double Chance Check
+                    else if (pickStr === '1X' || selStr.includes('1X')) { isWin = hG >= aG; }
+                    else if (pickStr === 'X2' || selStr.includes('X2')) { isWin = aG >= hG; }
+                    else if (pickStr === '12' || selStr.includes('12')) { isWin = hG !== aG; }
+                    
+                    // 4. BTTS (Both Teams to Score) Check
+                    else if (selStr.includes('BTTS') || pickStr === 'YES' || pickStr === 'NO') {
+                        if ((pickStr === 'YES' || selStr.includes('YES')) && bothScored) isWin = true;
+                        if ((pickStr === 'NO' || selStr.includes('NO')) && !bothScored) isWin = true;
+                    }
+                    // 5. Odd / Even Check
+                    else if (pickStr === 'ODD' || selStr === 'ODD') { isWin = (total % 2 !== 0); }
+                    else if (pickStr === 'EVEN' || selStr === 'EVEN') { isWin = (total % 2 === 0); }
+                    
+                    // 6. Default: Match Winner (1X2) Check
+                    else {
+                        if ((pickStr === '1' || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
+                        else if ((pickStr === 'X' || pickStr === 'DRAW' || selStr.includes('DRAW')) && hG === aG) isWin = true;
+                        else if ((pickStr === '2' || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
                     }
                 } else {
-                    isWin = Math.random() > 0.5;
+                    isWin = Math.random() > 0.5; // Random fallback if no admin result was ever posted
                 }
 
                 leg.status = isWin ? 'Won' : 'Lost';
