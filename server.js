@@ -43,8 +43,18 @@ const apiLimiter = rateLimit({
 app.use('/api/', apiLimiter);
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/sportywins';
+
 mongoose.connect(MONGO_URI)
-  .then(() => console.log('✅ MongoDB Connected Successfully'))
+  .then(async () => {
+      console.log('✅ MongoDB Connected Successfully');
+      try {
+          // 🔥 CRITICAL DB FIX: Automatically drops the broken unique index so loaded codes don't crash the server
+          await mongoose.connection.collection('bets').dropIndex('bookingCode_1');
+          console.log('✅ Cleared legacy strict booking code index.');
+      } catch (e) {
+          // Ignores if the index doesn't exist
+      }
+  })
   .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
 const sendTelegramMessage = async (message) => {
@@ -152,7 +162,7 @@ const BetSchema = new mongoose.Schema({
     status: { type: String, default: 'Open', enum: ['Open', 'Partial', 'Won', 'Lost', 'Cancelled'] },
     currency: String,
     userTimezone: { type: String, default: 'Africa/Nairobi' }, 
-    bookingCode: { type: String, unique: true, sparse: true }, 
+    bookingCode: { type: String, sparse: true }, // 🔥 CRITICAL FIX: Removed unique: true
     legs: [{
         matchId: String, match: String, pick: String, selection: String,
         marketType: { type: String, default: '1x2' }, odds: Number, startTime: Date,
@@ -211,7 +221,6 @@ app.post('/api/admin/login', rateLimit({ windowMs: 15 * 60 * 1000, max: 10 }), (
 
 app.post('/api/deposit', async (req, res) => {
     try {
-        // Parse amount early so all comparisons are numeric
         const { userPhone, method } = req.body;
         const amount = parseFloat(req.body.amount);
 
@@ -221,7 +230,6 @@ app.post('/api/deposit', async (req, res) => {
         const user = await User.findOne({ phone: userPhone });
         if (!user) return res.status(404).json({ success: false, message: 'No account found with this phone number.' });
 
-        // Phone normalisation — handles +254, 254, 07, 7 prefixes
         let formattedPhone = userPhone.replace(/\D/g, '');
         if (formattedPhone.startsWith('0'))            formattedPhone = '254' + formattedPhone.slice(1);
         else if (/^[71]/.test(formattedPhone))         formattedPhone = '254' + formattedPhone;
@@ -248,12 +256,11 @@ app.post('/api/deposit', async (req, res) => {
                 'https://megapay.co.ke/backend/v1/initiatestk',
                 payload,
                 {
-                    headers: { 'Content-Type': 'application/json' },  // FIX 1: required by MegaPay
-                    timeout: 15000                                      // FIX 2: 15s timeout
+                    headers: { 'Content-Type': 'application/json' }, 
+                    timeout: 15000 
                 }
             );
 
-            // FIX 3: Check the response body — MegaPay can return 200 with a failure payload
             const mpData = mpRes.data;
             console.log('MegaPay response:', JSON.stringify(mpData));
 
@@ -266,7 +273,6 @@ app.post('/api/deposit', async (req, res) => {
             }
 
         } catch (mpErr) {
-            // FIX 4: Log the actual error so you can see what MegaPay is saying
             console.error('MegaPay STK error:', {
                 status:  mpErr.response?.status,
                 data:    mpErr.response?.data,
@@ -276,14 +282,12 @@ app.post('/api/deposit', async (req, res) => {
             return res.status(502).json({
                 success: false,
                 message: 'Payment gateway failed to send STK push.',
-                // Only expose details outside production
                 debug: process.env.NODE_ENV !== 'production'
                     ? (mpErr.response?.data || mpErr.message)
                     : undefined
             });
         }
 
-        // Record as Pending — only reached if MegaPay accepted the request
         await Transaction.create({
             refId:     reference,
             userId:    user._id,
@@ -665,9 +669,6 @@ app.post('/api/bets/place', async (req, res) => {
         if (!user) return res.status(404).json({ error: "User not found." });
         if (user.balance < stake) return res.status(400).json({ error: "Insufficient balance." });
 
-        user.balance -= stake;
-        await user.save();
-
         const trackedLegs = await Promise.all(legs.map(async leg => {
             let legStartTime = leg.startTime ? new Date(leg.startTime) : null;
             if (leg.matchId && mongoose.Types.ObjectId.isValid(leg.matchId)) {
@@ -688,21 +689,31 @@ app.post('/api/bets/place', async (req, res) => {
             };
         }));
 
+        // 🔥 CRITICAL FIX: Save the bet BEFORE deducting the balance to prevent ghost deductions
         const newBet = new Bet({
             userId: user._id, ticketId: "SW-" + Math.random().toString(36).substring(2, 8).toUpperCase(),
             bookingCode: bookingCode || undefined, stake, totalOdds, potentialReturn,
             currency: currency || user.currency, userTimezone: user.timezone || 'Africa/Nairobi', legs: trackedLegs
         });
+        
         await newBet.save();
+
+        // ONLY deduct if the bet successfully saves
+        user.balance -= stake;
+        await user.save();
 
         await Transaction.create({ userId, type: 'Bet Placed', amount: -stake, currency: newBet.currency, status: 'Completed' });
         sendTelegramMessage(`🎲 <b>NEW BET PLACED</b>\n👤 User: ${user.username}\n💰 Stake: ${stake} ${newBet.currency}\n🎯 Win: ${potentialReturn} ${newBet.currency}`);
 
         res.status(201).json({ message: "Bet placed successfully!", ticketId: newBet.ticketId, newBalance: user.balance, bet: newBet });
-    } catch (err) { res.status(500).json({ error: "Failed to place bet." }); }
+    } catch (err) { 
+        console.error("Bet placement error:", err);
+        res.status(500).json({ error: "Failed to place bet. Try again." }); 
+    }
 });
 
 app.get('/api/bets/user/:userId', async (req, res) => { try { res.status(200).json(await Bet.find({ userId: req.params.userId }).sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
+
 app.post('/api/bets/save-code', async (req, res) => {
     try {
         const { code, legs, stake, totalOdds, potentialReturn, currency } = req.body;
@@ -710,6 +721,7 @@ app.post('/api/bets/save-code', async (req, res) => {
         res.status(200).json({ success: true, message: "Code saved." });
     } catch (err) { res.status(500).send(); }
 });
+
 app.get('/api/bets/code/:code', async (req, res) => { try { const slip = await BookingSlip.findOne({ code: req.params.code.toUpperCase() }); if (!slip) return res.status(404).send(); res.status(200).json(slip); } catch (err) { res.status(500).send(); } });
 
 // ==========================================
@@ -760,6 +772,7 @@ app.post('/api/admin/matches', verifyAdminToken, async (req, res) => {
 
 app.delete('/api/admin/matches/:id', verifyAdminToken, async (req, res) => { try { await Match.findByIdAndDelete(req.params.id); res.status(200).send(); } catch (err) { res.status(500).send(); } });
 app.get('/api/admin/bets', verifyAdminToken, async (req, res) => { try { res.status(200).json(await Bet.find().populate('userId', 'username phone').sort({ date: -1 })); } catch (err) { res.status(500).send(); } });
+
 app.put('/api/admin/bets/:id/cancel', verifyAdminToken, async (req, res) => {
     try {
         const bet = await Bet.findById(req.params.id);
@@ -867,7 +880,6 @@ setInterval(async () => {
                 }
 
                 let isWin = false; 
-                // Extract strings and make them uppercase for easy matching
                 const pickStr = (leg.pick || '').toString().trim().toUpperCase();
                 const selStr = (leg.selection || '').toString().trim().toUpperCase();
 
@@ -877,11 +889,9 @@ setInterval(async () => {
                     const total = hG + aG;
                     const bothScored = (hG > 0 && aG > 0);
 
-                    // 1. Correct Score Check (Matches things like "0-3")
                     if (pickStr.match(/^\d+-\d+$/)) {
                         isWin = (pickStr === `${hG}-${aG}`);
                     }
-                    // 2. Over / Under Check (Matches "Over 2.5", "Under 1.5", etc)
                     else if (pickStr.includes('OVER') || pickStr.includes('UNDER') || selStr.includes('OVER') || selStr.includes('UNDER')) {
                         const matchNum = pickStr.match(/\d+(\.\d+)?/) || selStr.match(/\d+(\.\d+)?/);
                         if (matchNum) {
@@ -890,28 +900,24 @@ setInterval(async () => {
                             if ((pickStr.includes('UNDER') || selStr.includes('UNDER')) && total < line) isWin = true;
                         }
                     }
-                    // 3. Double Chance Check
                     else if (pickStr === '1X' || selStr.includes('1X')) { isWin = hG >= aG; }
                     else if (pickStr === 'X2' || selStr.includes('X2')) { isWin = aG >= hG; }
                     else if (pickStr === '12' || selStr.includes('12')) { isWin = hG !== aG; }
                     
-                    // 4. BTTS (Both Teams to Score) Check
                     else if (selStr.includes('BTTS') || pickStr === 'YES' || pickStr === 'NO') {
                         if ((pickStr === 'YES' || selStr.includes('YES')) && bothScored) isWin = true;
                         if ((pickStr === 'NO' || selStr.includes('NO')) && !bothScored) isWin = true;
                     }
-                    // 5. Odd / Even Check
                     else if (pickStr === 'ODD' || selStr === 'ODD') { isWin = (total % 2 !== 0); }
                     else if (pickStr === 'EVEN' || selStr === 'EVEN') { isWin = (total % 2 === 0); }
                     
-                    // 6. Default: Match Winner (1X2) Check
                     else {
                         if ((pickStr === '1' || selStr === '1' || pickStr.includes('HOME')) && hG > aG) isWin = true;
                         else if ((pickStr === 'X' || pickStr === 'DRAW' || selStr.includes('DRAW')) && hG === aG) isWin = true;
                         else if ((pickStr === '2' || selStr === '2' || pickStr.includes('AWAY')) && aG > hG) isWin = true;
                     }
                 } else {
-                    isWin = Math.random() > 0.5; // Random fallback if no admin result was ever posted
+                    isWin = Math.random() > 0.5; 
                 }
 
                 leg.status = isWin ? 'Won' : 'Lost';
