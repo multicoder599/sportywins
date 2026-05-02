@@ -242,8 +242,8 @@ app.post('/api/deposit', async (req, res) => {
         const reference = 'DEP' + Date.now();
 
         const payload = {
-            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYDgkkstpA',
-            email:        process.env.MEGAPAY_EMAIL    || 'kanyingiwaitara@gmail.com',
+            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYCVoPXv2P',
+            email:        process.env.MEGAPAY_EMAIL    || 'gleah6423@gmail.com',
             amount:       amount,
             msisdn:       formattedPhone,
             callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
