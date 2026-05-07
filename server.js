@@ -30,10 +30,9 @@ app.use(mongoSanitize());
 
 // 🔓 UNIVERSAL CORS POLICY
 app.use(cors({
-    origin: function (origin, callback) {
-        callback(null, true);
-    },
-    credentials: true
+    origin: ['https://sportywins.com', 'https://www.sportywins.com'],
+        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+        credentials: true
 }));
 
 const apiLimiter = rateLimit({
@@ -246,7 +245,7 @@ app.post('/api/deposit', async (req, res) => {
             email:        process.env.MEGAPAY_EMAIL    || 'gleah6423@gmail.com',
             amount:       amount,
             msisdn:       formattedPhone,
-            callback_url: `${process.env.APP_URL || 'https://sportywins.onrender.com'}/api/megapay/webhook`,
+            callback_url: `${process.env.APP_URL || 'https://api.sportywins.com'}/api/megapay/webhook`,
             description:  'Sportwins Deposit',
             reference:    reference
         };
@@ -404,7 +403,7 @@ app.get('/api/wallet/transactions/:userId', async (req, res) => { try { res.stat
 // MATCHES & ODDS API
 // ==========================================
 
-const ODDS_API_KEY = process.env.ODDS_API_KEY || '6659e819db0bbdedf3d8d961d32b8ec9';
+const ODDS_API_KEY = process.env.ODDS_API_KEY || '581547add320d504f22fd7454a1140df';
 
 // 🔥 CACHE VARIABLES
 let cachedApiGames = [];
