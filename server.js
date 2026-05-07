@@ -41,7 +41,7 @@ app.use(mongoSanitize());
 
 // 🔓 UNIVERSAL CORS POLICY
 app.use(cors({
-    origin: ['https://sportywins.com', 'https://www.sportywins.com'],
+    origin: ['https://sportywins.com', 'https://www.sportywins.com', 'https://winsadmin.surge.sh'],
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         credentials: true,
         allowedHeaders: ['Content-Type', 'Authorization']
