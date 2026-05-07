@@ -15,6 +15,17 @@ const mongoSanitize = require('express-mongo-sanitize');
 const app = express();
 
 app.set('trust proxy', 1);
+
+// 🚨 1. CORS MUST BE FIRST 🚨
+// 🔓 UNIVERSAL CORS POLICY
+app.use(cors({
+    origin: ['https://sportywins.com', 'https://www.sportywins.com'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+
+// 🚨 2. Security and Parsers go NEXT 🚨
 app.use(helmet());
 app.use(express.json());
 
