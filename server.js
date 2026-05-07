@@ -32,7 +32,8 @@ app.use(mongoSanitize());
 app.use(cors({
     origin: ['https://sportywins.com', 'https://www.sportywins.com'],
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        credentials: true
+        credentials: true,
+        allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 const apiLimiter = rateLimit({
