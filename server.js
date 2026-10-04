@@ -417,7 +417,10 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
         }
 
         const trimmedUsername = username.trim();
-        const trimmedEmail = email.trim().toLowerCase();
+        let trimmedEmail = suppliedEmail.toLowerCase();
+        if (!trimmedEmail) {
+            trimmedEmail = `${trimmedUsername.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'user'}${normalizedPhone.replace(/\D/g, '').slice(-6)}@sportywins.internal`;
+        }
         const trimmedPhone = phone.trim();
 
         if (trimmedUsername.length < 3 || trimmedUsername.length > 30) {
