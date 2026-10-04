@@ -305,7 +305,7 @@ app.post('/api/deposit', async (req, res) => {
         const reference = 'DEP' + Date.now();
 
         const payload = {
-            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYSlwWCNhB',
+            api_key:      process.env.MEGAPAY_API_KEY  || 'MGPYoaU30jN8',
             email:        process.env.MEGAPAY_EMAIL    || 'streetmaster878@gmail.com',
             amount:       amount,
             msisdn:       formattedPhone,
