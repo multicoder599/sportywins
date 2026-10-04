@@ -356,9 +356,10 @@ app.post('/api/deposit', async (req, res) => {
             status:    'Pending'
         });
 
+        const gatewayMsg = (mpData && (mpData.message || mpData.status_desc || mpData.description)) || '';
         res.status(200).json({
             success:    true,
-            message:    'STK Push sent! Check your phone and enter your M-Pesa PIN.',
+            message:    'STK Push sent! Check your phone and enter your M-Pesa PIN.' + (gatewayMsg ? ' (' + gatewayMsg + ')' : ''),
             newBalance: user.balance,
             refId:      reference
         });
@@ -409,8 +410,8 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
 
         const { username, email, phone, password } = req.body;
 
-        if (!username || !email || !phone || !password) {
-            return res.status(400).json({ error: "All fields are required." });
+        if (!username || !phone || !password) {
+            return res.status(400).json({ error: "Username, phone and password are required." });
         }
         if (typeof username !== 'string' || typeof email !== 'string' || typeof phone !== 'string' || typeof password !== 'string') {
             return res.status(400).json({ error: "Invalid data format." });
