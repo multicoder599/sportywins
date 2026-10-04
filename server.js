@@ -314,6 +314,7 @@ app.post('/api/deposit', async (req, res) => {
             reference:    reference
         };
 
+        let mpData = null;
         try {
             const mpRes = await axios.post(
                 'https://megapay.co.ke/backend/v1/initiatestk',
@@ -321,7 +322,7 @@ app.post('/api/deposit', async (req, res) => {
                 { headers: { 'Content-Type': 'application/json' }, timeout: 15000 }
             );
 
-            const mpData = mpRes.data;
+            mpData = mpRes.data;
             console.log('MegaPay response:', JSON.stringify(mpData));
 
             if (mpData && (mpData.status === false || mpData.success === false || mpData.ResponseCode === '1')) {
