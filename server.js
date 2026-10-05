@@ -411,25 +411,20 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
 
         const { username, email, phone, password } = req.body;
 
+        // 🔥 Validate EVERYTHING before touching the database — on any error here,
+        // no user is created, so the person can simply fix the input and re-register.
         if (!username || !phone || !password) {
             return res.status(400).json({ error: "Username, phone and password are required." });
         }
-        if (typeof username !== 'string' || typeof email !== 'string' || typeof phone !== 'string' || typeof password !== 'string') {
+        if (typeof username !== 'string' || typeof phone !== 'string' || typeof password !== 'string') {
             return res.status(400).json({ error: "Invalid data format." });
         }
 
         const trimmedUsername = username.trim();
-        let trimmedEmail = suppliedEmail.toLowerCase();
-        if (!trimmedEmail) {
-            trimmedEmail = `${trimmedUsername.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'user'}${normalizedPhone.replace(/\D/g, '').slice(-6)}@sportywins.internal`;
-        }
         const trimmedPhone = phone.trim();
 
         if (trimmedUsername.length < 3 || trimmedUsername.length > 30) {
             return res.status(400).json({ error: "Username must be 3–30 characters." });
-        }
-        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
-            return res.status(400).json({ error: "Invalid email format." });
         }
         if (password.length < 6 || password.length > 128) {
             return res.status(400).json({ error: "Password must be 6–128 characters." });
@@ -445,6 +440,20 @@ app.post('/api/auth/register', rateLimit({ windowMs: 60 * 60 * 1000, max: 15 }),
             return res.status(400).json({
                 error: "Invalid Kenyan phone number. After +254, number must start with 7 or 1 (e.g. +254712345678 or +254112345678)."
             });
+        }
+
+        // Email is OPTIONAL (mobile-only signup). Validate only if supplied;
+        // otherwise generate a unique internal one from username + phone.
+        const suppliedEmail = (typeof email === 'string' && email.trim()) ? email.trim() : '';
+        if (suppliedEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(suppliedEmail)) {
+            return res.status(400).json({ error: "Invalid email format." });
+        }
+        let trimmedEmail = suppliedEmail.toLowerCase();
+        if (!trimmedEmail) {
+            trimmedEmail = `${trimmedUsername.toLowerCase().replace(/[^a-z0-9]/g, '').slice(0, 20) || 'user'}${normalizedPhone.replace(/\D/g, '').slice(-6)}@sportywins.internal`;
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmedEmail)) {
+            return res.status(400).json({ error: "Invalid email format." });
         }
 
         // Atomic uniqueness check
